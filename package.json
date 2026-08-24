@@ -1,0 +1,13 @@
+{
+  "name": "beast-academy-ocr-demo",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local DeepL MCP OAuth bridge for the OCR study-page pipeline",
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0"
+  }
+}
