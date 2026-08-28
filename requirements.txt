@@ -1,0 +1,10 @@
+# Python packages
+# The OCR and translation pipeline otherwise uses only the Python standard library.
+# Required by --export-pdf / PDF backfill features.
+PyMuPDF>=1.23.0,<2.0.0
+
+# System dependencies (install outside pip; these are not Python packages):
+# - Poppler: provides `pdftoppm` and `pdfinfo`, required for PDF page rendering
+#   and page counting in the OCR pipeline.
+# - Node.js >=18: required by the DeepL MCP bridge. Install its locked project
+#   dependency with `npm install` (see package-lock.json).

@@ -38,18 +38,20 @@
 
 默认读取项目目录中的`ocr_config.json`。配置支持JSONC风格的
 `// 单行注释`和`/* 块注释 */`；注释符出现在URL或其他字符串中时不会被删除。
-该文件已加入`.gitignore`，
-配置分为三层：`api_keys`仅保存平台密钥，`model_profiles`仅定义
-平台、模型ID、端点和能力，`model_usage`只决定各个步骤使用哪个资料名。
-直接在`api_keys`中填写需要的密钥：
+平台密钥只保存在同目录且已被`.gitignore`忽略的`.env`，配置文件中的
+`model_profiles`仅定义平台、模型ID、端点和能力，`model_usage`只决定各个步骤
+使用哪个资料名。
 
-```json
-"api_keys": {
-  "deepseek": "如使用DeepSeek官方模型则填写，否则留空",
-  "siliconflow": "填写SiliconFlow密钥",
-  "dashscope": "填写DashScope密钥"
-}
+首次配置时复制`.env.example`为`.env`，然后只在`.env`中填写需要的密钥：
+
+```dotenv
+SILICONFLOW_API_KEY=填写SiliconFlow密钥
+DASHSCOPE_API_KEY=填写DashScope密钥
+DEEPSEEK_API_KEY=如使用DeepSeek官方模型则填写，否则留空
 ```
+
+若系统环境变量也设置了同名密钥，系统环境变量优先于`.env`。旧配置中的
+`api_keys`字段已不再支持；请将其中的值迁移到`.env`后删除该字段。
 
 例如，不改动任何模型资料，只修改主OCR的用途映射：
 
@@ -82,13 +84,13 @@ DeepL密码。程序终端输出同时写入配置中的`log_file`。
 python3 ocr_demo.py --dry-run
 ```
 
-`ocr_config.example.json`是可复制的无密钥模板。
+`ocr_config.example.json`是可复制的无密钥模板；`.env.example`是无密钥的
+环境变量模板。
 
 ## 命令行运行示例
 
 ```bash
-export SILICONFLOW_API_KEY='...'
-export DASHSCOPE_API_KEY='...'
+# 在项目根目录的 .env 中设置密钥（或在系统环境变量中设置）。
 
 python3 ocr_demo.py \
   --pdf '../beast academy math guide 3A.pdf' \
@@ -97,6 +99,16 @@ python3 ocr_demo.py \
   --workers 2 \
   --verify always \
   --printed-page-offset -1
+```
+
+
+单独跑ocr
+```bash
+python ocr_demo.py `
+  --config .\ocr_config.json `
+  --mode exact `
+  --verify never `
+  --output .\runs\chapter1-exact-01
 ```
 
 个人学习用的选择性翻译（默认DeepL MCP）：

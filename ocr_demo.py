@@ -2,8 +2,8 @@
 """Small-batch OCR evaluation pipeline for illustrated math books.
 
 The demo intentionally uses only the Python standard library plus Poppler CLI
-tools. API keys are read from environment variables or an external key file and
-are never serialized into OCR results.
+tools. API keys are read from process environment variables or a project .env
+file and are never serialized into OCR results.
 """
 
 from __future__ import annotations
@@ -545,9 +545,16 @@ def find_poppler_pdftoppm(explicit: str | None = None) -> str:
     if explicit:
         candidates.append(pathlib.Path(explicit).expanduser())
     else:
+        command_from_path = shutil.which("pdftoppm")
+        if command_from_path:
+            candidates.append(pathlib.Path(command_from_path))
         for directory in os.environ.get("PATH", "").split(os.pathsep):
             if directory:
                 candidates.append(pathlib.Path(directory) / "pdftoppm")
+                # Windows stores the Poppler executable with this suffix.
+                # Checking it on other platforms is harmless and keeps this
+                # lookup independent of the host's executable-suffix rules.
+                candidates.append(pathlib.Path(directory) / "pdftoppm.exe")
         candidates.extend(
             [
                 pathlib.Path("/usr/local/opt/poppler/bin/pdftoppm"),
@@ -590,9 +597,16 @@ def find_poppler_pdftoppm(explicit: str | None = None) -> str:
 
 
 def find_matching_pdfinfo(pdftoppm_command: str) -> str:
-    sibling = pathlib.Path(pdftoppm_command).resolve().with_name("pdfinfo")
-    if sibling.is_file():
-        return str(sibling)
+    pdftoppm_path = pathlib.Path(pdftoppm_command).resolve()
+    sibling_names = (
+        ("pdfinfo.exe", "pdfinfo")
+        if pdftoppm_path.suffix.lower() == ".exe"
+        else ("pdfinfo", "pdfinfo.exe")
+    )
+    for name in sibling_names:
+        sibling = pdftoppm_path.with_name(name)
+        if sibling.is_file():
+            return str(sibling)
     command = shutil.which("pdfinfo")
     if command:
         return command
@@ -2841,6 +2855,52 @@ main {{ max-width:1500px; margin:0 auto; padding:24px; }}
     atomic_write_text(args.output / output_name, document)
 
 
+ENV_API_KEY_NAMES = frozenset(
+    {
+        "SILICONFLOW_API_KEY",
+        "DASHSCOPE_API_KEY",
+        "DEEPSEEK_API_KEY",
+    }
+)
+
+
+def load_env_file(env_path: pathlib.Path) -> None:
+    """Load supported API keys from a UTF-8 .env file without overriding the process.
+
+    Only the three API-key variables used by this project are read. Existing process
+    environment variables take precedence, allowing CI and shell-provided secrets to
+    override a local .env file.
+    """
+
+    if not env_path.is_file():
+        return
+    try:
+        lines = env_path.read_text(encoding="utf-8-sig").splitlines()
+    except OSError as error:
+        raise ValueError(f"Unable to read .env file: {env_path}") from error
+    for line_number, raw_line in enumerate(lines, start=1):
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line.removeprefix("export ").lstrip()
+        name, separator, raw_value = line.partition("=")
+        name = name.strip()
+        if not separator or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+            raise ValueError(f"Invalid .env entry on line {line_number}")
+        if name not in ENV_API_KEY_NAMES:
+            continue
+        value = raw_value.strip()
+        if value[:1] in {"'", '"'}:
+            quote = value[0]
+            if len(value) < 2 or value[-1] != quote:
+                raise ValueError(f"Unclosed quoted value in .env line {line_number}")
+            value = value[1:-1]
+        elif " #" in value:
+            value = value.split(" #", 1)[0].rstrip()
+        os.environ.setdefault(name, value)
+
+
 def discover_config_path(argv: list[str]) -> pathlib.Path | None:
     pre_parser = argparse.ArgumentParser(add_help=False)
     pre_parser.add_argument("--config", type=pathlib.Path)
@@ -2941,8 +3001,12 @@ def load_config_defaults(config_path: pathlib.Path) -> dict[str, Any]:
         "translation_verify",
         "log_file",
     }
+    if "api_keys" in data:
+        raise ValueError(
+            "config.api_keys is no longer supported; move keys to the .env file "
+            "beside this config"
+        )
     allowed_fields = direct_fields | {
-        "api_keys",
         "translation",
         "model_profiles",
         "model_usage",
@@ -2968,18 +3032,6 @@ def load_config_defaults(config_path: pathlib.Path) -> dict[str, Any]:
     if not isinstance(pdf_backfill, dict):
         raise ValueError("config.pdf_backfill must be an object")
     defaults["pdf_backfill"] = pdf_backfill
-
-    api_keys = data.get("api_keys", {})
-    if not isinstance(api_keys, dict):
-        raise ValueError("config.api_keys must be an object")
-    unknown_keys = sorted(
-        set(api_keys) - {"siliconflow", "dashscope", "deepseek"}
-    )
-    if unknown_keys:
-        raise ValueError(f"Unknown api key fields: {', '.join(unknown_keys)}")
-    defaults["siliconflow_key"] = str(api_keys.get("siliconflow", "")).strip()
-    defaults["dashscope_key"] = str(api_keys.get("dashscope", "")).strip()
-    defaults["deepseek_key"] = str(api_keys.get("deepseek", "")).strip()
 
     translation = data.get("translation", {})
     if not isinstance(translation, dict):
@@ -3597,6 +3649,13 @@ def validate_args(args: argparse.Namespace) -> list[int]:
 
 def main() -> int:
     config_path = discover_config_path(sys.argv[1:])
+    env_path = (
+        config_path.parent if config_path else pathlib.Path(__file__).resolve().parent
+    ) / ".env"
+    try:
+        load_env_file(env_path)
+    except ValueError as error:
+        build_parser().error(str(error))
     defaults: dict[str, Any] = {}
     if config_path is not None:
         try:

@@ -3,6 +3,7 @@ __pycache__/
 runs/
 node_modules/
 ocr_config.json
+.env
 .secrets/
 *.log
 *.pdf

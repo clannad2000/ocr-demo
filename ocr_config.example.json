@@ -143,7 +143,7 @@
       "provider": "siliconflow",
       // 平台API要求的真实模型ID。
       "model": "deepseek-ai/DeepSeek-OCR",
-      // 引用api_keys中的密钥名，此处不存密钥。
+      // 引用.env中的SILICONFLOW_API_KEY，此处不存密钥。
       "api_key_name": "siliconflow",
       // OpenAI兼容Chat Completions地址。
       "chat_endpoint": "https://api.siliconflow.cn/v1/chat/completions",
@@ -158,7 +158,7 @@
       "provider": "dashscope",
       // 平台API要求的真实模型ID。
       "model": "qwen3.6-flash",
-      // 引用api_keys.dashscope。
+      // 引用.env中的DASHSCOPE_API_KEY。
       "api_key_name": "dashscope",
       // 文本、翻译和主OCR使用的Chat Completions地址。
       "chat_endpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
@@ -175,7 +175,7 @@
       "provider": "dashscope",
       // 平台API要求的真实模型ID。
       "model": "qwen3.7-max-2026-06-08",
-      // 引用api_keys.dashscope。
+      // 引用.env中的DASHSCOPE_API_KEY。
       "api_key_name": "dashscope",
       // 文本和翻译复核使用的Chat Completions地址。
       "chat_endpoint": "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions",
@@ -192,7 +192,7 @@
       "provider": "deepseek",
       // DeepSeek官方API的真实模型ID。
       "model": "deepseek-v4-pro",
-      // 引用api_keys.deepseek。
+      // 引用.env中的DEEPSEEK_API_KEY。
       "api_key_name": "deepseek",
       // DeepSeek官方Chat Completions地址。
       "chat_endpoint": "https://api.deepseek.com/chat/completions",
@@ -216,15 +216,6 @@
     "translation_verifier": "qwen-max",
     // 可同时选多个；配好DeepSeek密钥后可改为 ["qwen-max", "deepseek-v4"]。
     "chapter_review": ["qwen-max"]
-  },
-  // OCR平台密钥。该文件已被.gitignore忽略，但仍不要对外分享。
-  "api_keys": {
-    // DeepSeek官方API密钥，仅被api_key_name=deepseek的模型配置引用。
-    "deepseek": "",
-    // 硅基流动API密钥，供DeepSeek-OCR版面识别使用。
-    "siliconflow": "",
-    // 阿里云DashScope API密钥，供Qwen主OCR和复核模型使用。
-    "dashscope": ""
   },
   // DeepL翻译与OAuth MCP连接设置。
   "translation": {

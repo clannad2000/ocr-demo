@@ -1,4 +1,5 @@
 import json
+import os
 import pathlib
 import sys
 import tempfile
@@ -25,6 +26,10 @@ from ocr_demo import (  # noqa: E402
     compact_page_label,
     collect_review_reasons,
     deepseek_regions,
+    find_matching_pdfinfo,
+    find_poppler_pdftoppm,
+    load_config_defaults,
+    load_env_file,
     numeric_tokens,
     merge_with_existing_records,
     parse_pages,
@@ -52,6 +57,52 @@ def result(content: str) -> ApiResult:
 
 
 class OcrDemoTests(unittest.TestCase):
+    def test_load_env_file_uses_supported_keys_and_keeps_process_precedence(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            env_path = pathlib.Path(temporary) / ".env"
+            env_path.write_text(
+                "# local credentials\n"
+                "SILICONFLOW_API_KEY='file-layout-key'\n"
+                "DASHSCOPE_API_KEY=file-text-key # local-only comment\n"
+                "DEEPSEEK_API_KEY=\"file-review-key\"\n"
+                "UNRELATED_SETTING=ignored\n",
+                encoding="utf-8",
+            )
+            with mock.patch.dict(
+                "os.environ",
+                {"DASHSCOPE_API_KEY": "process-text-key"},
+                clear=True,
+            ):
+                load_env_file(env_path)
+                self.assertEqual(os.environ["SILICONFLOW_API_KEY"], "file-layout-key")
+                self.assertEqual(os.environ["DASHSCOPE_API_KEY"], "process-text-key")
+                self.assertEqual(os.environ["DEEPSEEK_API_KEY"], "file-review-key")
+                self.assertNotIn("UNRELATED_SETTING", os.environ)
+
+    def test_config_rejects_persisted_api_keys(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            config_path = pathlib.Path(temporary) / "ocr_config.json"
+            config_path.write_text(
+                '{"api_keys": {"siliconflow": "test-key"}}', encoding="utf-8"
+            )
+            with self.assertRaisesRegex(ValueError, r"move keys to the .env file"):
+                load_config_defaults(config_path)
+
+    def test_poppler_windows_executables_are_discovered_from_path(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            pdftoppm = root / "pdftoppm.exe"
+            pdfinfo = root / "pdfinfo.exe"
+            pdftoppm.touch()
+            pdfinfo.touch()
+            with (
+                mock.patch.dict("os.environ", {"PATH": str(root)}),
+                mock.patch("ocr_demo.shutil.which", return_value=None),
+                mock.patch("ocr_demo.supports_poppler_pdftoppm", return_value=True),
+            ):
+                self.assertEqual(find_poppler_pdftoppm(), str(pdftoppm))
+                self.assertEqual(find_matching_pdfinfo(str(pdftoppm)), str(pdfinfo))
+
     def test_final_translation_snapshot_uses_adjudication_then_human_override(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
