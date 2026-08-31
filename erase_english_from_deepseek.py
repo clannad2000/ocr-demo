@@ -410,6 +410,97 @@ def merge_local_mask(
     global_mask[y1:y2, x1:x2] = cv2.bitwise_or(target, local_mask)
 
 
+def erase_image_boxes(
+    image: np.ndarray,
+    normalized_boxes: Sequence[Sequence[float]],
+    *,
+    coordinate_max: int = 1000,
+    padding_ratio: float = 0.20,
+    min_color_distance: float = 18.0,
+    dark_delta: float = 26.0,
+    dilate_iterations: int = 1,
+    inpaint_radius: float = 3.0,
+    inpaint_method: str = "telea",
+) -> Tuple[np.ndarray, np.ndarray, List[Dict[str, Any]]]:
+    """Erase supplied normalized OCR boxes from an in-memory BGR image.
+
+    This reusable core performs no OCR and writes no files. Callers decide
+    which already-grounded regions are safe to erase.
+    """
+    if (
+        not isinstance(image, np.ndarray)
+        or image.ndim != 3
+        or image.shape[2] != 3
+    ):
+        raise ProcessingError("image must be a BGR array with three channels")
+    if coordinate_max <= 0:
+        raise ProcessingError("coordinate-max must be greater than zero")
+    if padding_ratio < 0:
+        raise ProcessingError("padding-ratio must not be negative")
+    if min_color_distance <= 0:
+        raise ProcessingError("min-color-distance must be greater than zero")
+    if dark_delta <= 0:
+        raise ProcessingError("dark-delta must be greater than zero")
+    if dilate_iterations < 0:
+        raise ProcessingError("dilate-iterations must not be negative")
+    if inpaint_radius <= 0:
+        raise ProcessingError("inpaint-radius must be greater than zero")
+    if inpaint_method not in {"telea", "ns"}:
+        raise ProcessingError("inpaint-method must be telea or ns")
+
+    image_height, image_width = image.shape[:2]
+    global_mask = np.zeros((image_height, image_width), dtype=np.uint8)
+    details: List[Dict[str, Any]] = []
+    for raw_box in normalized_boxes:
+        if len(raw_box) != 4:
+            raise ProcessingError("each normalized erase box must contain four values")
+        try:
+            normalized_box = [float(value) for value in raw_box]
+        except (TypeError, ValueError) as error:
+            raise ProcessingError("erase box coordinates must be numeric") from error
+        if (
+            normalized_box[2] <= normalized_box[0]
+            or normalized_box[3] <= normalized_box[1]
+        ):
+            raise ProcessingError(f"invalid normalized erase box: {normalized_box}")
+        pixel_box = norm_box_to_pixels(
+            normalized_box,
+            image_width,
+            image_height,
+            coordinate_max,
+        )
+        local_mask, outer_box, mask_stats = build_region_mask(
+            image=image,
+            box=pixel_box,
+            padding_ratio=padding_ratio,
+            min_color_distance=min_color_distance,
+            dark_delta=dark_delta,
+        )
+        merge_local_mask(global_mask, local_mask, outer_box)
+        details.append(
+            {
+                "bbox_norm": normalized_box,
+                "bbox_px": pixel_box,
+                "mask": mask_stats,
+            }
+        )
+
+    if dilate_iterations:
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+        global_mask = cv2.dilate(
+            global_mask,
+            kernel,
+            iterations=dilate_iterations,
+        )
+    if not np.any(global_mask):
+        return image.copy(), global_mask, details
+    inpaint_flag = (
+        cv2.INPAINT_TELEA if inpaint_method == "telea" else cv2.INPAINT_NS
+    )
+    cleaned = cv2.inpaint(image, global_mask, inpaint_radius, inpaint_flag)
+    return cleaned, global_mask, details
+
+
 def draw_debug_overlay(
     image: np.ndarray,
     regions: Iterable[Dict[str, Any]],

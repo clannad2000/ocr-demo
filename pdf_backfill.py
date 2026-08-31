@@ -47,7 +47,14 @@ DEFAULT_BACKFILL_RULES: dict[str, Any] = {
     "maximum_vertical_overflow_ratio": 1.5,
     "erase_padding_normalized": [3.0, 2.0, 3.0, 2.0],
     "placement_padding_normalized": [4.0, 0.0, 4.0, 0.0],
-    "background_strategy": "nearby_median",
+    "background_strategy": "opencv_inpaint",
+    "erase_render_long_edge": 2048,
+    "erase_padding_ratio": 0.20,
+    "erase_min_color_distance": 18.0,
+    "erase_dark_delta": 26.0,
+    "erase_dilate_iterations": 1,
+    "erase_inpaint_radius": 3.0,
+    "erase_inpaint_method": "telea",
     "minimum_write_match_coverage": 0.65,
     "ambiguous_mapping_minimum_coverage": 0.9,
     "skip_dense_geometry_labels": False,
@@ -642,8 +649,11 @@ def merge_rules(raw_rules: dict[str, Any] | None) -> dict[str, Any]:
             rules[key].update(value)
         else:
             rules[key] = value
-    if rules["background_strategy"] != "nearby_median":
-        raise ValueError("Only background_strategy=nearby_median is supported")
+    if rules["background_strategy"] not in {"opencv_inpaint", "nearby_median"}:
+        raise ValueError("Only background_strategy=opencv_inpaint is supported")
+    # Accept old local configs without restoring the retired rectangle-fill
+    # behavior. The resolved rule always records the active implementation.
+    rules["background_strategy"] = "opencv_inpaint"
     if rules["unmatched_action"] != "skip":
         raise ValueError("Only unmatched_action=skip is supported")
     if rules["child_note_action"] != "omit":
@@ -676,6 +686,20 @@ def merge_rules(raw_rules: dict[str, Any] | None) -> dict[str, Any]:
         raise ValueError(
             "PDF backfill geometry_reference_minimum_regions must be at least 3"
         )
+    if int(rules["erase_render_long_edge"]) < 512:
+        raise ValueError("PDF backfill erase_render_long_edge must be at least 512")
+    if float(rules["erase_padding_ratio"]) < 0:
+        raise ValueError("PDF backfill erase_padding_ratio cannot be negative")
+    if float(rules["erase_min_color_distance"]) <= 0:
+        raise ValueError("PDF backfill erase_min_color_distance must be positive")
+    if float(rules["erase_dark_delta"]) <= 0:
+        raise ValueError("PDF backfill erase_dark_delta must be positive")
+    if int(rules["erase_dilate_iterations"]) < 0:
+        raise ValueError("PDF backfill erase_dilate_iterations cannot be negative")
+    if float(rules["erase_inpaint_radius"]) <= 0:
+        raise ValueError("PDF backfill erase_inpaint_radius must be positive")
+    if rules["erase_inpaint_method"] not in {"telea", "ns"}:
+        raise ValueError("PDF backfill erase_inpaint_method must be telea or ns")
     return rules
 
 
@@ -744,6 +768,70 @@ def _sample_background(pixmap: Any, rect: Any, page_rect: Any) -> tuple[float, f
         float(statistics.median(color[channel] for color in colors)) / 255.0
         for channel in range(3)
     )
+
+
+def _build_inpaint_overlay(
+    fitz: Any,
+    source_page: Any,
+    normalized_boxes: list[list[float]],
+    rules: dict[str, Any],
+) -> dict[str, Any]:
+    """Build one transparent, page-sized PNG containing only repaired pixels."""
+    if not normalized_boxes:
+        return {"png": None, "mask_pixel_count": 0, "details": []}
+    try:
+        import cv2  # type: ignore
+        import numpy as np  # type: ignore
+
+        from erase_english_from_deepseek import erase_image_boxes
+    except ImportError as error:
+        raise RuntimeError(
+            "OpenCV text erasure requires numpy and opencv-python-headless; "
+            "install the packages listed in requirements.txt"
+        ) from error
+
+    long_edge = int(rules["erase_render_long_edge"])
+    scale = long_edge / max(source_page.rect.width, source_page.rect.height)
+    pixmap = source_page.get_pixmap(
+        matrix=fitz.Matrix(scale, scale),
+        colorspace=fitz.csRGB,
+        alpha=False,
+    )
+    rgb = np.frombuffer(pixmap.samples, dtype=np.uint8).reshape(
+        pixmap.height, pixmap.width, pixmap.n
+    )[:, :, :3]
+    bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
+    expanded_boxes = [
+        _expand_normalized_box(box, rules["erase_padding_normalized"])
+        for box in normalized_boxes
+    ]
+    cleaned, mask, details = erase_image_boxes(
+        bgr,
+        expanded_boxes,
+        coordinate_max=1000,
+        padding_ratio=float(rules["erase_padding_ratio"]),
+        min_color_distance=float(rules["erase_min_color_distance"]),
+        dark_delta=float(rules["erase_dark_delta"]),
+        dilate_iterations=int(rules["erase_dilate_iterations"]),
+        inpaint_radius=float(rules["erase_inpaint_radius"]),
+        inpaint_method=str(rules["erase_inpaint_method"]),
+    )
+    mask_pixel_count = int(np.count_nonzero(mask))
+    if not mask_pixel_count:
+        return {"png": None, "mask_pixel_count": 0, "details": details}
+
+    overlay = np.zeros((pixmap.height, pixmap.width, 4), dtype=np.uint8)
+    selected = mask > 0
+    overlay[selected, :3] = cleaned[selected]
+    overlay[:, :, 3] = mask
+    encoded, payload = cv2.imencode(".png", overlay)
+    if not encoded:
+        raise RuntimeError("Could not encode the OpenCV inpaint overlay")
+    return {
+        "png": payload.tobytes(),
+        "mask_pixel_count": mask_pixel_count,
+        "details": details,
+    }
 
 
 def _luminance(color: tuple[float, float, float]) -> float:
@@ -950,6 +1038,7 @@ def export_chinese_pdf(
     source = fitz.open(source_pdf)
     output = fitz.open()
     export_regions: list[dict[str, Any]] = []
+    page_erasure_summaries: list[dict[str, Any]] = []
     try:
         font = fitz.Font(fontfile=str(font_file))
         for source_page_number in pages:
@@ -966,6 +1055,7 @@ def export_chinese_pdf(
             target_page.insert_font(fontname="zhfont", fontfile=str(font_file))
             pixmap = source_page.get_pixmap(matrix=fitz.Matrix(1.0, 1.0), alpha=False)
             page_mappings = mappings_by_page.get(source_page_number, [])
+            prepared_mappings: list[dict[str, Any]] = []
             for raw_mapping in page_mappings:
                 mapping = copy.deepcopy(raw_mapping)
                 coordinate = (source_page_number, str(mapping["id"]))
@@ -1009,6 +1099,47 @@ def export_chinese_pdf(
                             }
                         )
                         continue
+                prepared_mappings.append({"mapping": mapping, "override": override})
+
+            inpaint_boxes: list[list[float]] = []
+            for prepared in prepared_mappings:
+                mapping = prepared["mapping"]
+                override = prepared["override"]
+                if override.get("background_color"):
+                    prepared["erase_detail_range"] = None
+                    continue
+                start = len(inpaint_boxes)
+                inpaint_boxes.extend(
+                    [float(value) for value in box]
+                    for box in mapping.get("erase_boxes", [])
+                )
+                prepared["erase_detail_range"] = (start, len(inpaint_boxes))
+
+            erasure = _build_inpaint_overlay(
+                fitz,
+                source_page,
+                inpaint_boxes,
+                rules,
+            )
+            if erasure["png"] is not None:
+                target_page.insert_image(
+                    target_page.rect,
+                    stream=erasure["png"],
+                    overlay=True,
+                )
+            page_erasure_summaries.append(
+                {
+                    "page": source_page_number,
+                    "method": "opencv_inpaint",
+                    "input_box_count": len(inpaint_boxes),
+                    "mask_pixel_count": erasure["mask_pixel_count"],
+                    "render_long_edge": int(rules["erase_render_long_edge"]),
+                }
+            )
+
+            for prepared in prepared_mappings:
+                mapping = prepared["mapping"]
+                override = prepared["override"]
                 erase_rects: list[Any] = []
                 sampled_backgrounds: list[tuple[float, float, float]] = []
                 for erase_box in mapping.get("erase_boxes", []):
@@ -1043,13 +1174,35 @@ def export_chinese_pdf(
                     region_background = _sample_background(
                         pixmap, placement_rect, source_page.rect
                     )
-                for erase_rect in erase_rects:
-                    target_page.draw_rect(
-                        erase_rect,
-                        color=None,
-                        fill=region_background,
-                        overlay=True,
+                erase_method = "opencv_inpaint"
+                erase_detail_range = prepared.get("erase_detail_range")
+                selected_before_dilation = 0
+                if override.get("background_color"):
+                    erase_method = "solid_color_override"
+                    for erase_rect in erase_rects:
+                        target_page.draw_rect(
+                            erase_rect,
+                            color=None,
+                            fill=region_background,
+                            overlay=True,
+                        )
+                elif erase_detail_range is not None:
+                    start, end = erase_detail_range
+                    selected_before_dilation = sum(
+                        int(
+                            detail["mask"][
+                                "selected_pixel_count_before_dilation"
+                            ]
+                        )
+                        for detail in erasure["details"][start:end]
                     )
+                empty_erasure_mask = (
+                    not erase_rects
+                    or (
+                        erase_method == "opencv_inpaint"
+                        and selected_before_dilation == 0
+                    )
+                )
                 placement_box = [float(value) for value in mapping["placement_box"]]
                 if override.get("offset_x"):
                     offset_x = float(override["offset_x"])
@@ -1158,7 +1311,13 @@ def export_chinese_pdf(
                         "vertical_overflow_ratio": round(vertical_ratio, 3),
                         "alignment": alignment,
                         "vertical_alignment": vertical_alignment,
-                        "erase_fill_color": _color_hex(region_background),
+                        "erase_method": erase_method,
+                        "erase_mask_pixel_count_before_dilation": (
+                            selected_before_dilation
+                            if erase_method == "opencv_inpaint"
+                            else None
+                        ),
+                        "background_sample_color": _color_hex(region_background),
                         "text_rect": [
                             round(text_rect.x0, 3),
                             round(text_rect.y0, 3),
@@ -1166,6 +1325,7 @@ def export_chinese_pdf(
                             round(text_rect.y1, 3),
                         ],
                         "warnings": mapping.get("warnings", [])
+                        + (["empty_erasure_mask"] if empty_erasure_mask else [])
                         + (
                             ["large_vertical_overflow"]
                             if vertical_ratio
@@ -1218,6 +1378,11 @@ def export_chinese_pdf(
         if float(region.get("vertical_overflow_ratio", 0.0))
         > float(rules["maximum_vertical_overflow_ratio"])
     )
+    empty_erasure_mask_count = sum(
+        1
+        for region in written_regions
+        if "empty_erasure_mask" in region.get("warnings", [])
+    )
     return {
         "schema_version": 1,
         "edition": "chinese",
@@ -1230,6 +1395,12 @@ def export_chinese_pdf(
         "severe_text_overlap_count": len(severe_overlaps),
         "severe_text_overlaps": severe_overlaps,
         "large_vertical_overflow_count": large_vertical_overflow_count,
+        "empty_erasure_mask_count": empty_erasure_mask_count,
+        "text_erasure": {
+            "method": "opencv_inpaint",
+            "scope": "written_translation_regions_only",
+            "page_summaries": page_erasure_summaries,
+        },
         "regions": export_regions,
     }
 
@@ -1362,6 +1533,14 @@ def program_check_pdf(
             "examples": export_result.get("severe_text_overlaps", [])[:10],
         },
     )
+    empty_erasure_mask_count = int(
+        export_result.get("empty_erasure_mask_count", 0)
+    )
+    add(
+        "written_regions_have_erasure_masks",
+        empty_erasure_mask_count == 0,
+        empty_erasure_mask_count,
+    )
     warnings: list[str] = []
     if int(plan.get("unmapped_count", 0)):
         warnings.append(f"unmapped_regions={plan['unmapped_count']}")
@@ -1381,6 +1560,8 @@ def program_check_pdf(
             "large_vertical_overflow="
             f"{export_result['large_vertical_overflow_count']}"
         )
+    if empty_erasure_mask_count:
+        warnings.append(f"empty_erasure_mask={empty_erasure_mask_count}")
     passed = all(check["passed"] for check in checks)
     return {
         "schema_version": 1,

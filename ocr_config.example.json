@@ -92,8 +92,17 @@
       "erase_padding_normalized": [3.0, 2.0, 3.0, 2.0],
       // 中文放置区域四周扩展量，顺序为左、上、右、下，坐标范围为0到1000。
       "placement_padding_normalized": [4.0, 0.0, 4.0, 0.0],
-      // 背景修复策略：采样英文框周围颜色并使用近似纯色覆盖，允许轻微瑕疵。
-      "background_strategy": "nearby_median",
+      // 背景修复策略：使用字形级掩码和OpenCV局部修复，不再默认整框纯色覆盖。
+      "background_strategy": "opencv_inpaint",
+      // 擦除阶段渲染页面的最长边像素数；只将修复像素透明叠加回原PDF。
+      "erase_render_long_edge": 2048,
+      // 以下参数与erase_english_from_deepseek.py的字形掩码和修复参数一致。
+      "erase_padding_ratio": 0.2,
+      "erase_min_color_distance": 18.0,
+      "erase_dark_delta": 26.0,
+      "erase_dilate_iterations": 1,
+      "erase_inpaint_radius": 3.0,
+      "erase_inpaint_method": "telea",
       // 匹配覆盖率低于该值时保留原英文，不自动擦除和回填。
       "minimum_write_match_coverage": 0.65,
       // 同一译文有多个坐标候选时，只有覆盖率达到该值才自动回填。

@@ -301,17 +301,61 @@ class OcrDemoTests(unittest.TestCase):
         self.assertEqual(request["pages"][0]["page"], 5)
         self.assertIn("Human visual acceptance", request["instruction"])
 
+    def test_legacy_background_rule_resolves_to_opencv_inpaint(self):
+        rules = merge_rules({"background_strategy": "nearby_median"})
+        self.assertEqual(rules["background_strategy"], "opencv_inpaint")
+
+    def test_reusable_erasure_core_builds_a_glyph_mask(self):
+        try:
+            import cv2
+            import numpy as np
+
+            from erase_english_from_deepseek import erase_image_boxes
+        except ImportError:
+            self.skipTest("OpenCV text-erasure dependencies are not installed")
+        image = np.full((80, 160, 3), (230, 240, 245), dtype=np.uint8)
+        cv2.putText(
+            image,
+            "Hi",
+            (45, 52),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1.0,
+            (15, 15, 15),
+            2,
+            cv2.LINE_AA,
+        )
+        cleaned, mask, details = erase_image_boxes(
+            image,
+            [[250, 200, 700, 750]],
+            dilate_iterations=1,
+        )
+        selected = mask > 0
+        self.assertGreater(int(np.count_nonzero(selected)), 0)
+        self.assertLess(int(np.count_nonzero(selected)), 160 * 80 // 4)
+        self.assertGreater(
+            float(np.mean(cleaned[selected])), float(np.mean(image[selected]))
+        )
+        self.assertTrue(np.array_equal(cleaned[:10, :10], image[:10, :10]))
+        self.assertGreater(
+            details[0]["mask"]["selected_pixel_count_before_dilation"], 0
+        )
+
     def test_small_pdf_backfill_and_program_check(self):
         try:
             import fitz
         except ImportError:
             self.skipTest("PyMuPDF is not installed")
-        font_file = pathlib.Path(
-            "/System/Library/AssetsV2/com_apple_MobileAsset_Font7/"
-            "eb257c12d1a51c8c661b89f30eec56cacf9b8987.asset/AssetData/STHEITI.ttf"
-        )
-        if not font_file.is_file():
-            self.skipTest("STHeiti font is not available")
+        font_candidates = [
+            pathlib.Path(
+                "/System/Library/AssetsV2/com_apple_MobileAsset_Font7/"
+                "eb257c12d1a51c8c661b89f30eec56cacf9b8987.asset/"
+                "AssetData/STHEITI.ttf"
+            ),
+            pathlib.Path("C:/Windows/Fonts/simhei.ttf"),
+        ]
+        font_file = next((path for path in font_candidates if path.is_file()), None)
+        if font_file is None:
+            self.skipTest("A supported Chinese test font is not available")
         with tempfile.TemporaryDirectory() as temporary:
             root = pathlib.Path(temporary)
             source_pdf = root / "source.pdf"
@@ -378,7 +422,16 @@ class OcrDemoTests(unittest.TestCase):
                 export_result=exported,
             )
             self.assertEqual(exported["status_counts"], {"written": 1})
-            self.assertEqual(exported["regions"][0]["erase_fill_color"], "#800080")
+            self.assertEqual(exported["regions"][0]["erase_method"], "opencv_inpaint")
+            self.assertEqual(
+                exported["regions"][0]["background_sample_color"], "#800080"
+            )
+            self.assertGreater(
+                exported["regions"][0][
+                    "erase_mask_pixel_count_before_dilation"
+                ],
+                0,
+            )
             self.assertLess(exported["regions"][0]["font_size"], 11.0)
             self.assertEqual(checked["status"], "program_checked")
             self.assertEqual(checked["visual_review"], "not_performed_human_required")
