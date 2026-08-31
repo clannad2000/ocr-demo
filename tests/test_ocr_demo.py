@@ -1,6 +1,9 @@
 import json
+import io
 import os
 import pathlib
+import shutil
+import subprocess
 import sys
 import tempfile
 import types
@@ -12,6 +15,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from ocr_demo import (  # noqa: E402
     ApiResult,
+    DeepLMcpBridge,
     analyze_risk,
     analyze_study_risk,
     apply_thinking_setting,
@@ -65,6 +69,7 @@ class OcrDemoTests(unittest.TestCase):
                 "SILICONFLOW_API_KEY='file-layout-key'\n"
                 "DASHSCOPE_API_KEY=file-text-key # local-only comment\n"
                 "DEEPSEEK_API_KEY=\"file-review-key\"\n"
+                "DEEPL_OAUTH_CREDENTIALS=file-deepl-oauth\n"
                 "UNRELATED_SETTING=ignored\n",
                 encoding="utf-8",
             )
@@ -77,6 +82,9 @@ class OcrDemoTests(unittest.TestCase):
                 self.assertEqual(os.environ["SILICONFLOW_API_KEY"], "file-layout-key")
                 self.assertEqual(os.environ["DASHSCOPE_API_KEY"], "process-text-key")
                 self.assertEqual(os.environ["DEEPSEEK_API_KEY"], "file-review-key")
+                self.assertEqual(
+                    os.environ["DEEPL_OAUTH_CREDENTIALS"], "file-deepl-oauth"
+                )
                 self.assertNotIn("UNRELATED_SETTING", os.environ)
 
     def test_config_rejects_persisted_api_keys(self):
@@ -87,6 +95,35 @@ class OcrDemoTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, r"move keys to the .env file"):
                 load_config_defaults(config_path)
+
+    def test_deepl_oauth_credentials_replace_env_entry_without_touching_other_keys(self):
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("Node.js is not installed")
+        with tempfile.TemporaryDirectory() as temporary:
+            env_path = pathlib.Path(temporary) / ".env"
+            env_path.write_text(
+                "DASHSCOPE_API_KEY=keep-this\r\n"
+                "DEEPL_OAUTH_CREDENTIALS=old\r\n"
+                "DEEPL_OAUTH_CREDENTIALS=duplicate\r\n",
+                encoding="utf-8",
+            )
+            module_uri = pathlib.Path("deepl_mcp_client.mjs").resolve().as_uri()
+            script = (
+                f'import {{ writeEnvCredential }} from {json.dumps(module_uri)};'
+                ' await writeEnvCredential(process.argv[1], "replacement");'
+            )
+            subprocess.run(
+                [node, "--input-type=module", "-e", script, str(env_path)],
+                input="",
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            updated = env_path.read_text(encoding="utf-8")
+            self.assertIn("DASHSCOPE_API_KEY=keep-this", updated)
+            self.assertEqual(updated.count("DEEPL_OAUTH_CREDENTIALS="), 1)
+            self.assertIn("DEEPL_OAUTH_CREDENTIALS=replacement", updated)
 
     def test_poppler_windows_executables_are_discovered_from_path(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -558,8 +595,7 @@ class OcrDemoTests(unittest.TestCase):
             deepl_bridge_script=pathlib.Path("deepl_mcp_client.mjs"),
             deepl_mcp_endpoint="https://mcp.deepl.com/v1/mcp",
             deepl_oauth_callback_port=8765,
-            deepl_oauth_keychain_service="test",
-            deepl_oauth_keychain_account="test",
+            deepl_env_file=pathlib.Path(".env"),
             deepl_source_lang="EN",
             deepl_target_lang="ZH-HANS",
             deepl_formality="",
@@ -583,7 +619,42 @@ class OcrDemoTests(unittest.TestCase):
             ["r001", "r002"],
         )
         self.assertEqual(len(bridge.requests), 2)
+        self.assertEqual(bridge.requests[0]["env_file"], ".env")
         self.assertIn("r002: Try again.", bridge.requests[0]["context"])
+
+    def test_deepl_mcp_bridge_reads_json_lines_without_select(self):
+        class FakeProcess:
+            def __init__(self):
+                self.stdin = io.StringIO()
+                self.stdout = io.StringIO(
+                    '{"id":1,"ok":true,"result":{"text":"译文"}}\n'
+                )
+                self.stderr = io.StringIO()
+                self.returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout):
+                self.returncode = 0
+                return 0
+
+            def terminate(self):
+                self.returncode = 1
+
+            def kill(self):
+                self.returncode = 1
+
+        process = FakeProcess()
+        bridge = DeepLMcpBridge("node", pathlib.Path("bridge.mjs"))
+        with mock.patch(
+            "ocr_demo.subprocess.Popen", return_value=process
+        ) as popen:
+            response = bridge.request({"action": "translate"})
+        self.assertEqual(response, {"text": "译文"})
+        self.assertIn('"id": 1', process.stdin.getvalue())
+        self.assertEqual(popen.call_args.kwargs["encoding"], "utf-8")
+        bridge.close()
 
     def test_translation_context_is_page_aware_and_bounded(self):
         regions = [

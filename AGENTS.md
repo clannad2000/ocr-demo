@@ -13,10 +13,6 @@
 - 若缺少软件、依赖或需要管理员权限，立即停止，给出多个方案及优缺点，等用户选择。
 
 ## 安全与不可变数据
-
-- 不输出、复制或提交实际API密钥、OAuth令牌、Authorization头或DeepL密码。
-- `ocr_config.json`和`runs/`即使已忽略也按敏感本地数据处理；配置检查只输出布尔状态或脱敏值。
-- 原始PDF始终只读；不覆盖或删除用户的批次产物。
 - Codex裁决不得写回页面JSON、`manifest.json`或`study.html`；只生成独立裁决和`study-reviewed.html`。
 - 应用裁决前必须验证输入SHA-256和全部`page + region id`。
 

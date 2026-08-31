@@ -205,7 +205,8 @@ DeepL密码或OAuth令牌。
 - `--resume --redo-pages`只重做指定页；`--reanalyze`、`--retranslate`和`--reverify-translation`分层维护；
 - 局部维护后与既有页合并，不把总汇总缩成子集；
 - PDF始终只读；`ocr_config.json`和`runs/`即使已忽略也仍按敏感数据处理；
-- DeepL密码只输入官方OAuth页，令牌由macOS钥匙串保存；
+- DeepL密码只输入官方OAuth页；OAuth数据编码保存在已被Git忽略的`.env`
+  `DEEPL_OAUTH_CREDENTIALS`中，刷新时自动更新，且不写入日志；
 - 只重试限流、超时和服务器错误，不对参数或认证错误盲目重试。
 
 ## 10. 已验证决策

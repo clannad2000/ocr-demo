@@ -22,7 +22,7 @@
 - Python 3.11或更高版本
 - Node.js 18或更高版本
 - Poppler命令：`pdfinfo`、`pdftoppm`
-- 项目级`@modelcontextprotocol/sdk`（已安装并锁定在`package-lock.json`）
+- 项目级`@modelcontextprotocol/sdk`（已锁定在`package-lock.json`）
 - 可登录的DeepL帐号及有效席位订阅，不需要DeepL API Key
 
 不需要安装额外Python包。如果在新目录中重建项目，运行
@@ -48,6 +48,8 @@
 SILICONFLOW_API_KEY=填写SiliconFlow密钥
 DASHSCOPE_API_KEY=填写DashScope密钥
 DEEPSEEK_API_KEY=如使用DeepSeek官方模型则填写，否则留空
+# 首次DeepL OAuth登录后由程序自动生成，请勿手工填写或提交
+DEEPL_OAUTH_CREDENTIALS=
 ```
 
 若系统环境变量也设置了同名密钥，系统环境变量优先于`.env`。旧配置中的
@@ -70,13 +72,21 @@ DEEPSEEK_API_KEY=如使用DeepSeek官方模型则填写，否则留空
 不要填写DeepL用户名或密码。然后直接执行：
 
 ```bash
+# macOS / Linux
 cd '/Volumes/DATA2/如子/book/ocr-demo'
 python3 ocr_demo.py
 ```
 
-首次实际翻译会打开DeepL OAuth授权页；授权后，客户端注册信息和令牌保存在
-macOS钥匙串项`Beast Academy OCR DeepL MCP`中，项目不会收到或保存
-DeepL密码。程序终端输出同时写入配置中的`log_file`。
+```powershell
+# Windows PowerShell
+Set-Location 'D:\project\ocr-demo'
+python .\ocr_demo.py
+```
+
+首次实际翻译会打开DeepL OAuth授权页；授权后，客户端注册信息和令牌会编码
+保存到项目`.env`的`DEEPL_OAUTH_CREDENTIALS`，后续刷新令牌时自动更新该值。
+项目不会收到或保存DeepL密码，也不会把OAuth凭据写入日志。请像保护API Key
+一样保护`.env`，不要提交或分享。程序终端输出同时写入配置中的`log_file`。
 
 在不调用任何模型的情况下检查配置：
 
@@ -111,16 +121,10 @@ python ocr_demo.py `
   --output .\runs\chapter1-exact-01
 ```
 
-个人学习用的选择性翻译（默认DeepL MCP）：
+个人学习用的选择性翻译,带ocr（默认DeepL MCP）：
 
 ```bash
-python3 ocr_demo.py \
-  --pdf '../beast academy math guide 3A.pdf' \
-  --pages '25,53,57,73,93' \
-  --output './runs/study-batch-01' \
-  --mode study \
-  --workers 2 \
-  --verify auto
+ python ocr_demo.py   --pdf './book/beast academy math guide 3A.pdf'   --pages '25,53'   --output './runs/study-batch-01'   --mode study   --workers 2   --verify auto
 ```
 
 学习模式会翻译：对白、问题、指令、解释、定义、标题/目录、图注和脚注。
@@ -361,3 +365,11 @@ python3 -m unittest discover -s tests -v
 `runs/study-batch-03`覆盖24个代表页面和359个翻译条目。页面类型包括目录、
 索引、普通/黑底漫画、手写笔记、百数表、定义页和几何图。详细评估见
 `runs/study-batch-03/evaluation.md`。
+
+
+
+
+### 删除DeepL授权
+
+关闭正在运行的批处理后，删除`.env`中的整行
+`DEEPL_OAUTH_CREDENTIALS=...`。下次翻译时程序会重新打开DeepL授权页。

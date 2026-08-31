@@ -263,10 +263,8 @@
     ],
     // 本地OAuth回调端口。如果8765被其他程序占用，可改为其他1024-65535端口。
     "oauth_callback_port": 8765,
-    // macOS钥匙串中保存OAuth数据的服务名，通常不需要修改。
-    "oauth_keychain_service": "Beast Academy OCR DeepL MCP",
-    // macOS钥匙串中OAuth数据的账户标识，默认使用MCP地址。
-    "oauth_keychain_account": "https://mcp.deepl.com/v1/mcp",
+    // OAuth登录后取得的凭据由程序自动写入.env的DEEPL_OAUTH_CREDENTIALS。
+    // 不要在本配置文件中保存DeepL密码、令牌或其他密钥。
     // 启动MCP辅助进程的Node.js命令，已加入PATH时保持node即可。
     "node_command": "node",
     // 项目内DeepL MCP OAuth辅助脚本路径。

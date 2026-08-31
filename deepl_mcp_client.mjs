@@ -3,17 +3,14 @@
 import { createServer } from "node:http";
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
-import { mkdir, stat } from "node:fs/promises";
-import { homedir } from "node:os";
-import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { chmod, readFile, rename, writeFile } from "node:fs/promises";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 
 const DEFAULT_ENDPOINT = "https://mcp.deepl.com/v1/mcp";
 const DEFAULT_CALLBACK_PORT = 8765;
-const DEFAULT_KEYCHAIN_SERVICE = "Beast Academy OCR DeepL MCP";
+const OAUTH_ENV_NAME = "DEEPL_OAUTH_CREDENTIALS";
 
 function log(message) {
   process.stderr.write(`[deepl-mcp] ${message}\n`);
@@ -23,82 +20,53 @@ function errorMessage(error) {
   return error instanceof Error ? `${error.name}: ${error.message}` : String(error);
 }
 
-function runProcess(command, args, input = null) {
-  return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-    const stdout = [];
-    const stderr = [];
-    child.stdout.on("data", (chunk) => {
-      stdout.push(chunk);
-    });
-    child.stderr.on("data", (chunk) => {
-      stderr.push(chunk);
-    });
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code === 0) {
-        resolve(Buffer.concat(stdout));
-      } else {
-        const detail = Buffer.concat(stderr).toString("utf8").trim();
-        const error = new Error(detail || `${command} exited with ${code}`);
-        error.exitCode = code;
-        reject(error);
-      }
-    });
-    if (input === null) {
-      child.stdin.end();
+function encodeOAuthData(data) {
+  return Buffer.from(JSON.stringify(data), "utf8").toString("base64url");
+}
+
+function decodeOAuthData(value) {
+  const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("OAuth credentials are not a JSON object");
+  }
+  return parsed;
+}
+
+async function writeEnvCredential(envFile, value) {
+  if (!envFile) throw new Error("DeepL OAuth .env path is missing");
+  let source = "";
+  try {
+    source = await readFile(envFile, "utf8");
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  const newline = source.includes("\r\n") ? "\r\n" : "\n";
+  const replacement = `${OAUTH_ENV_NAME}=${value}`;
+  const lines = source ? source.replace(/\r?\n$/, "").split(/\r?\n/) : [];
+  let replaced = false;
+  const updated = [];
+  for (const line of lines) {
+    if (new RegExp(`^\\s*(?:export\\s+)?${OAUTH_ENV_NAME}\\s*=`).test(line)) {
+      if (!replaced) updated.push(replacement);
+      replaced = true;
     } else {
-      child.stdin.end(input);
+      updated.push(line);
     }
+  }
+  if (!replaced) updated.push(replacement);
+  const temporary = `${envFile}.${process.pid}.tmp`;
+  await writeFile(temporary, `${updated.join(newline)}${newline}`, {
+    encoding: "utf8",
+    mode: 0o600,
   });
+  await rename(temporary, envFile);
+  await chmod(envFile, 0o600).catch(() => {});
 }
 
-let keychainHelperPromise;
-
-async function keychainHelperPath() {
-  if (keychainHelperPromise) return keychainHelperPromise;
-  keychainHelperPromise = (async () => {
-    const source = fileURLToPath(new URL("./deepl_keychain_helper.c", import.meta.url));
-    const cacheDirectory = join(homedir(), "Library", "Caches", "BeastAcademyOCR");
-    const binary = join(cacheDirectory, "deepl-keychain-helper");
-    await mkdir(cacheDirectory, { recursive: true, mode: 0o700 });
-    let rebuild = false;
-    try {
-      const [sourceInfo, binaryInfo] = await Promise.all([stat(source), stat(binary)]);
-      rebuild = sourceInfo.mtimeMs > binaryInfo.mtimeMs;
-    } catch {
-      rebuild = true;
-    }
-    if (rebuild) {
-      log("Building the local macOS Keychain helper.");
-      await runProcess("/usr/bin/clang", [
-        source,
-        "-framework",
-        "Security",
-        "-framework",
-        "CoreFoundation",
-        "-o",
-        binary,
-      ]);
-    }
-    return binary;
-  })();
-  return keychainHelperPromise;
-}
-
-async function runKeychain(command, service, account, input = null) {
-  const helper = await keychainHelperPath();
-  return runProcess(helper, [command, service, account], input);
-}
-
-class KeychainOAuthProvider {
-  constructor({ redirectUrl, endpoint, service, account, onRedirect }) {
+class EnvFileOAuthProvider {
+  constructor({ redirectUrl, envFile, onRedirect }) {
     this._redirectUrl = redirectUrl;
-    this._endpoint = endpoint;
-    this._service = service;
-    this._account = account;
+    this._envFile = envFile;
     this._onRedirect = onRedirect;
     this._loaded = false;
     this._data = {};
@@ -121,24 +89,27 @@ class KeychainOAuthProvider {
   async _load() {
     if (this._loaded) return;
     this._loaded = true;
+    const encoded = process.env[OAUTH_ENV_NAME];
+    if (!encoded) return;
     try {
-      const raw = await runKeychain("get", this._service, this._account);
-      const parsed = JSON.parse(raw.toString("utf8"));
-      if (parsed && typeof parsed === "object") this._data = parsed;
+      this._data = decodeOAuthData(encoded);
     } catch (error) {
-      if (error.exitCode !== 44) {
-        throw new Error(`Cannot read OAuth data from Keychain: ${errorMessage(error)}`);
-      }
+      throw new Error(
+        `Cannot read DeepL OAuth credentials from ${OAUTH_ENV_NAME}: ${errorMessage(error)}`,
+      );
     }
   }
 
   async _save() {
-    await runKeychain(
-      "set",
-      this._service,
-      this._account,
-      JSON.stringify(this._data),
-    );
+    try {
+      const encoded = encodeOAuthData(this._data);
+      await writeEnvCredential(this._envFile, encoded);
+      process.env[OAUTH_ENV_NAME] = encoded;
+    } catch (error) {
+      throw new Error(
+        `Cannot save DeepL OAuth credentials to .env: ${errorMessage(error)}`,
+      );
+    }
   }
 
   async clientInformation() {
@@ -161,6 +132,7 @@ class KeychainOAuthProvider {
     await this._load();
     this._data.tokens = tokens;
     await this._save();
+    log("OAuth credentials updated in .env.");
   }
 
   async redirectToAuthorization(authorizationUrl) {
@@ -242,14 +214,31 @@ function startCallbackServer(port) {
 }
 
 function openBrowser(url) {
+  const address = url.toString();
+  let command;
+  let args;
+  if (process.platform === "darwin") {
+    command = "/usr/bin/open";
+    args = [address];
+  } else if (process.platform === "win32") {
+    command = "rundll32.exe";
+    args = ["url.dll,FileProtocolHandler", address];
+  } else if (process.platform === "linux") {
+    command = "xdg-open";
+    args = [address];
+  } else {
+    log(`Cannot open a browser automatically on ${process.platform}.`);
+    log(`Open this URL manually: ${address}`);
+    return Promise.resolve();
+  }
   return new Promise((resolve) => {
-    const child = spawn("/usr/bin/open", [url.toString()], {
+    const child = spawn(command, args, {
       stdio: "ignore",
       detached: true,
     });
     child.once("error", (error) => {
       log(`Cannot open browser automatically: ${errorMessage(error)}`);
-      log(`Open this URL manually: ${url.toString()}`);
+      log(`Open this URL manually: ${address}`);
       resolve();
     });
     child.once("spawn", () => {
@@ -263,8 +252,7 @@ class DeepLMcpClient {
   constructor(options) {
     this.endpoint = options.endpoint || DEFAULT_ENDPOINT;
     this.callbackPort = Number(options.callbackPort || DEFAULT_CALLBACK_PORT);
-    this.keychainService = options.keychainService || DEFAULT_KEYCHAIN_SERVICE;
-    this.keychainAccount = options.keychainAccount || this.endpoint;
+    this.envFile = options.envFile;
     this.client = null;
     this.transport = null;
   }
@@ -292,11 +280,9 @@ class DeepLMcpClient {
       );
     }
     const redirectUrl = `http://127.0.0.1:${this.callbackPort}/callback`;
-    const provider = new KeychainOAuthProvider({
+    const provider = new EnvFileOAuthProvider({
       redirectUrl,
-      endpoint: this.endpoint,
-      service: this.keychainService,
-      account: this.keychainAccount,
+      envFile: this.envFile,
       onRedirect: async (authorizationUrl) => {
         log("Opening the DeepL OAuth authorization page in the browser.");
         log("The project never receives or stores your DeepL password.");
@@ -334,7 +320,9 @@ class DeepLMcpClient {
         } finally {
           clearTimeout(timeoutId);
         }
+        log("OAuth callback received; exchanging the authorization code.");
         await firstTransport.finishAuth(callback.code);
+        log("OAuth authorization code exchange completed.");
         await firstTransport.close().catch(() => {});
         const connected = await this._newConnection(provider);
         this.client = connected.client;
@@ -399,6 +387,8 @@ class DeepLMcpClient {
   }
 }
 
+export { decodeOAuthData, encodeOAuthData, writeEnvCredential };
+
 let activeClient = null;
 
 async function handleRequest(request) {
@@ -406,8 +396,7 @@ async function handleRequest(request) {
   const options = {
     endpoint: request.endpoint,
     callbackPort: request.oauth_callback_port,
-    keychainService: request.oauth_keychain_service,
-    keychainAccount: request.oauth_keychain_account,
+    envFile: request.env_file,
   };
   if (!activeClient) activeClient = new DeepLMcpClient(options);
   if (request.action === "health") return activeClient.health();

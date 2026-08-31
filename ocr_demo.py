@@ -2,8 +2,8 @@
 """Small-batch OCR evaluation pipeline for illustrated math books.
 
 The demo intentionally uses only the Python standard library plus Poppler CLI
-tools. API keys are read from process environment variables or a project .env
-file and are never serialized into OCR results.
+tools. API credentials are read from process environment variables or a project
+.env file and are never serialized into OCR results.
 """
 
 from __future__ import annotations
@@ -21,8 +21,8 @@ import html
 import json
 import os
 import pathlib
+import queue
 import re
-import select
 import shutil
 import subprocess
 import sys
@@ -303,6 +303,8 @@ class DeepLMcpBridge:
         self.process: subprocess.Popen[str] | None = None
         self.request_id = 0
         self.lock = threading.Lock()
+        self.response_queue: queue.Queue[str | BaseException | None] | None = None
+        self.stdout_thread: threading.Thread | None = None
         self.stderr_thread: threading.Thread | None = None
 
     def _start(self) -> None:
@@ -314,16 +316,36 @@ class DeepLMcpBridge:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="strict",
             bufsize=1,
         )
+        process = self.process
+        self.response_queue = queue.Queue()
+        response_queue = self.response_queue
+
+        def forward_stdout() -> None:
+            assert process.stdout is not None
+            try:
+                for line in process.stdout:
+                    response_queue.put(line)
+            except BaseException as error:
+                response_queue.put(error)
+            finally:
+                response_queue.put(None)
 
         def forward_stderr() -> None:
-            assert self.process is not None
-            assert self.process.stderr is not None
-            for line in self.process.stderr:
+            assert process.stderr is not None
+            for line in process.stderr:
                 sys.stderr.write(line)
                 sys.stderr.flush()
 
+        self.stdout_thread = threading.Thread(
+            target=forward_stdout,
+            name="deepl-mcp-stdout",
+            daemon=True,
+        )
+        self.stdout_thread.start()
         self.stderr_thread = threading.Thread(
             target=forward_stderr,
             name="deepl-mcp-stderr",
@@ -337,6 +359,7 @@ class DeepLMcpBridge:
             assert self.process is not None
             assert self.process.stdin is not None
             assert self.process.stdout is not None
+            assert self.response_queue is not None
             self.request_id += 1
             expected_id = self.request_id
             request = dict(payload)
@@ -351,20 +374,20 @@ class DeepLMcpBridge:
                 raise RuntimeError(
                     f"DeepL MCP helper stopped before request (exit={exit_code})"
                 ) from error
-            ready, _, _ = select.select(
-                [self.process.stdout], [], [], self.timeout_seconds
-            )
-            if not ready:
+            try:
+                line = self.response_queue.get(timeout=self.timeout_seconds)
+            except queue.Empty:
                 self.close()
                 raise TimeoutError(
                     f"DeepL MCP request timed out after {self.timeout_seconds}s"
                 )
-            line = self.process.stdout.readline()
-            if not line:
+            if line is None:
                 exit_code = self.process.poll()
                 raise RuntimeError(
                     f"DeepL MCP helper returned no response (exit={exit_code})"
                 )
+            if isinstance(line, BaseException):
+                raise RuntimeError("Cannot read DeepL MCP helper output") from line
             try:
                 response = json.loads(line)
             except json.JSONDecodeError as error:
@@ -385,6 +408,7 @@ class DeepLMcpBridge:
     def close(self) -> None:
         process = self.process
         self.process = None
+        self.response_queue = None
         if process is None:
             return
         if process.stdin is not None:
@@ -918,8 +942,7 @@ def call_deepl_mcp_translation(
                     "action": "translate",
                     "endpoint": args.deepl_mcp_endpoint,
                     "oauth_callback_port": args.deepl_oauth_callback_port,
-                    "oauth_keychain_service": args.deepl_oauth_keychain_service,
-                    "oauth_keychain_account": args.deepl_oauth_keychain_account,
+                    "env_file": str(args.deepl_env_file),
                     "text": region["source_text"],
                     "source_lang": args.deepl_source_lang,
                     "target_lang": args.deepl_target_lang,
@@ -2860,6 +2883,7 @@ ENV_API_KEY_NAMES = frozenset(
         "SILICONFLOW_API_KEY",
         "DASHSCOPE_API_KEY",
         "DEEPSEEK_API_KEY",
+        "DEEPL_OAUTH_CREDENTIALS",
     }
 )
 
@@ -2867,9 +2891,10 @@ ENV_API_KEY_NAMES = frozenset(
 def load_env_file(env_path: pathlib.Path) -> None:
     """Load supported API keys from a UTF-8 .env file without overriding the process.
 
-    Only the three API-key variables used by this project are read. Existing process
+    Only credential variables used by this project are read. Existing process
     environment variables take precedence, allowing CI and shell-provided secrets to
-    override a local .env file.
+    override a local .env file. DeepL OAuth credentials are generated and refreshed
+    by the MCP helper; users should not edit their encoded value manually.
     """
 
     if not env_path.is_file():
@@ -3617,7 +3642,11 @@ def validate_args(args: argparse.Namespace) -> list[int]:
     if pages[-1] > count:
         raise ValueError(f"PDF has {count} pages; requested page {pages[-1]}")
     if maintenance_modes and not args.output.is_dir():
-        raise ValueError("Maintenance mode requires an existing output directory")
+        print(
+            "Maintenance mode requires an existing output directory; "
+            "if this is a new run, create the output directory first"
+        )
+        #raise ValueError("Maintenance mode requires an existing output directory")
     if args.build_reviewed_study or args.build_final_translation or args.export_pdf:
         if args.adjudication_file is None:
             args.adjudication_file = (
@@ -3673,6 +3702,7 @@ def main() -> int:
     if args.adjudication_file is not None:
         args.adjudication_file = args.adjudication_file.expanduser().resolve()
     args.deepl_bridge_script = args.deepl_bridge_script.expanduser().resolve()
+    args.deepl_env_file = env_path.resolve()
     args.siliconflow_key = getattr(args, "siliconflow_key", "") or os.environ.get(
         "SILICONFLOW_API_KEY", ""
     )
