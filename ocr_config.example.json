@@ -17,8 +17,8 @@
   "workers": 2,
   // 复核策略：auto 仅复核风险页；always 每页复核；never 不调用复核模型。
   "verify": "auto",
-  // 翻译语义复核：always 每个成功翻译的页面调用一次复核模型；never 关闭。复核只标记问题，不自动改译文。
-  "translation_verify": "always",
+  // 翻译语义复核开关：默认never，不在DeepL翻译后调用复核模型；改为always可开启。复核只标记问题，不自动改译文。
+  "translation_verify": "never",
   // 是否续跑已有输出。首次运行用 false，中断后继续可改为 true。
   "resume": false,
   // 是否只重新语义复核已保存的英中译文。常规运行保持 false，建议通过 --reverify-translation 临时开启。
@@ -31,6 +31,54 @@
   "build_reviewed_study": false,
   // Codex整章裁决JSON路径，相对路径以本配置文件所在目录为基准。
   "adjudication_file": "./runs/chapter1-study-01/chapter_review-codex-adjudication.json",
+  // 独立页级Codex最终复核。复用本机ChatGPT登录，不读取或使用API Key。
+  "codex_page_review": {
+    // 本机Codex CLI命令或绝对路径。
+    "command": "codex",
+    // Codex CLI模型名。
+    "model": "gpt-5.6-terra",
+    // 推理强度：默认high，可按本机Codex支持范围调整。
+    "reasoning_effort": "high",
+    // 单页复核最长等待秒数。
+    "timeout_seconds": 1800,
+    // 图片策略：on_demand先做纯文本复核，仅对明确需要图片证据的区域启动第二阶段。
+    // 可选never（始终不传图）、on_demand（默认两阶段）、always（首阶段直接传图）。
+    "image_mode": "on_demand",
+    // 必须由codex login status确认使用ChatGPT登录，避免误走API Key计费。
+    "require_chatgpt_login": true
+  },
+  // 整书Codex最终复核：app-server将固定规则放在developer instructions中，按章节复用持久线程。
+  "codex_book_review": {
+    // 未填写的command/model/reasoning_effort/image_mode会继承codex_page_review。
+    "model": "gpt-5.6-terra",
+    "reasoning_effort": "high",
+    "timeout_seconds": 1800,
+    // 目录页始终带图解析；high通常足以识别目录标题、页码和层级。
+    "toc_image_detail": "high",
+    // 封面、版权/出版信息和目录页默认也翻译；仅显式设为true时排除。
+    "exclude_preliminary": false,
+    // 默认不建立Index、Appendix、Answers或Glossary的翻译任务。
+    "exclude_back_matter": true,
+    // 正文页仍采用先文本、必要时再附图的两阶段模式。
+    "image_mode": "on_demand",
+    "require_chatgpt_login": true
+  },
+  // 纯中文回写器：只消费erase_english_from_deepseek.py生成的cleaned PNG，不执行擦除。
+  "pdf_translation_writer": {
+    // 相对路径以本配置文件所在目录为基准；允许递归查找page-NNNN.cleaned.png。
+    "cleaned_pages_dir": "./runs/chapter1-study-01/erase",
+    "output_filename": "beast-academy-3A-zh-review.pdf",
+    "report_filename": "pdf_translation_writer_report.json",
+    "font_file": "C:/Windows/Fonts/simhei.ttf",
+    // 这里只包含写字和布局规则，不接受mask、redaction或inpaint参数。
+    "rules": {
+      "minimum_font_size": 7.0,
+      "font_size_step": 0.5,
+      "line_spacing": 1.25,
+      "minimum_write_match_coverage": 0.65,
+      "ambiguous_mapping_minimum_coverage": 0.9
+    }
+  },
   // PDF回填设置：与OCR、翻译和模型用途完全解耦，只读取已经保存的最终译文和坐标。
   "pdf_backfill": {
     // 纯中文版输出文件名。相对路径以本次output目录为基准，原始PDF永远不会被覆盖。

@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
-"""Small-batch OCR evaluation pipeline for illustrated math books.
+"""Standalone JSON-page OCR pipeline for illustrated math books.
 
 The demo intentionally uses only the Python standard library plus Poppler CLI
 tools. API credentials are read from process environment variables or a project
 .env file and are never serialized into OCR results.
+
+This variant writes page PNG and JSON records but omits
+``pages/page-NNNN.md``. It still writes ``manifest.json``, ``summary.md``, and
+``study.html`` in study mode. DeepL translation semantic review is disabled by
+default and can be enabled with ``translation_verify: always`` in the config.
 """
 
 from __future__ import annotations
@@ -514,6 +519,12 @@ def atomic_write_text(path: pathlib.Path, text: str) -> None:
 
 def atomic_write_json(path: pathlib.Path, value: Any) -> None:
     atomic_write_text(path, json.dumps(value, ensure_ascii=False, indent=2) + "\n")
+
+
+def write_page_json(path: pathlib.Path, record: dict[str, Any]) -> None:
+    """Persist one page record without creating per-page Markdown."""
+
+    atomic_write_json(path, record)
 
 
 def render_page(
@@ -1821,11 +1832,9 @@ def process_page(args: argparse.Namespace, page: int) -> dict[str, Any]:
     pages_dir = args.output / "pages"
     image_path = pages_dir / f"page-{page:04d}.png"
     json_path = pages_dir / f"page-{page:04d}.json"
-    markdown_path = pages_dir / f"page-{page:04d}.md"
     if (
         args.resume
         and json_path.exists()
-        and markdown_path.exists()
         and page not in args.redo_pages
     ):
         return json.loads(json_path.read_text(encoding="utf-8"))
@@ -1940,8 +1949,7 @@ def process_page(args: argparse.Namespace, page: int) -> dict[str, Any]:
         "review_reasons": review_reasons,
         "review_required": review_required,
     }
-    atomic_write_json(json_path, record)
-    atomic_write_text(markdown_path, page_markdown(record))
+    write_page_json(json_path, record)
     with print_lock:
         print(
             json.dumps(
@@ -1964,7 +1972,6 @@ def process_page(args: argparse.Namespace, page: int) -> dict[str, Any]:
 def reanalyze_page(args: argparse.Namespace, page: int) -> dict[str, Any]:
     pages_dir = args.output / "pages"
     json_path = pages_dir / f"page-{page:04d}.json"
-    markdown_path = pages_dir / f"page-{page:04d}.md"
     if not json_path.exists():
         raise ValueError(f"Existing page result not found: {json_path}")
     record = json.loads(json_path.read_text(encoding="utf-8"))
@@ -2004,15 +2011,13 @@ def reanalyze_page(args: argparse.Namespace, page: int) -> dict[str, Any]:
             record["risk"], record["verifier_comparison"]
         )
     record["review_required"] = bool(record["review_reasons"])
-    atomic_write_json(json_path, record)
-    atomic_write_text(markdown_path, page_markdown(record))
+    write_page_json(json_path, record)
     return record
 
 
 def retranslate_page(args: argparse.Namespace, page: int) -> dict[str, Any]:
     pages_dir = args.output / "pages"
     json_path = pages_dir / f"page-{page:04d}.json"
-    markdown_path = pages_dir / f"page-{page:04d}.md"
     if not json_path.exists():
         raise ValueError(f"Existing page result not found: {json_path}")
     record = json.loads(json_path.read_text(encoding="utf-8"))
@@ -2054,8 +2059,7 @@ def retranslate_page(args: argparse.Namespace, page: int) -> dict[str, Any]:
         record["translation_verifier_comparison"],
     )
     record["review_required"] = bool(record["review_reasons"])
-    atomic_write_json(json_path, record)
-    atomic_write_text(markdown_path, page_markdown(record))
+    write_page_json(json_path, record)
     with print_lock:
         print(
             json.dumps(
@@ -2081,7 +2085,6 @@ def reverify_translation_page(
 
     pages_dir = args.output / "pages"
     json_path = pages_dir / f"page-{page:04d}.json"
-    markdown_path = pages_dir / f"page-{page:04d}.md"
     if not json_path.exists():
         raise ValueError(f"Existing page result not found: {json_path}")
     record = json.loads(json_path.read_text(encoding="utf-8"))
@@ -2122,8 +2125,7 @@ def reverify_translation_page(
         record["translation_verifier_comparison"],
     )
     record["review_required"] = bool(record["review_reasons"])
-    atomic_write_json(json_path, record)
-    atomic_write_text(markdown_path, page_markdown(record))
+    write_page_json(json_path, record)
     with print_lock:
         print(
             json.dumps(
@@ -3036,15 +3038,16 @@ def load_config_defaults(config_path: pathlib.Path) -> dict[str, Any]:
         "model_profiles",
         "model_usage",
         "pdf_backfill",
-        "pdf_translation_writer",
         "codex_page_review",
-        "codex_book_review",
     }
     unknown = sorted(set(data) - allowed_fields)
     if unknown:
         raise ValueError(f"Unknown config fields: {', '.join(unknown)}")
 
     defaults = {field: data[field] for field in direct_fields if field in data}
+    translation_verify = defaults.get("translation_verify")
+    if translation_verify not in (None, "always", "never"):
+        raise ValueError("config.translation_verify must be 'always' or 'never'")
     model_profiles = data.get("model_profiles")
     if model_profiles is not None:
         if not isinstance(model_profiles, dict):
@@ -3061,16 +3064,9 @@ def load_config_defaults(config_path: pathlib.Path) -> dict[str, Any]:
         raise ValueError("config.pdf_backfill must be an object")
     defaults["pdf_backfill"] = pdf_backfill
 
-    pdf_translation_writer = data.get("pdf_translation_writer", {})
-    if not isinstance(pdf_translation_writer, dict):
-        raise ValueError("config.pdf_translation_writer must be an object")
-
     codex_page_review = data.get("codex_page_review", {})
     if not isinstance(codex_page_review, dict):
         raise ValueError("config.codex_page_review must be an object")
-    codex_book_review = data.get("codex_book_review", {})
-    if not isinstance(codex_book_review, dict):
-        raise ValueError("config.codex_book_review must be an object")
 
     translation = data.get("translation", {})
     if not isinstance(translation, dict):
@@ -3202,8 +3198,11 @@ def build_parser(defaults: dict[str, Any] | None = None) -> argparse.ArgumentPar
     parser.add_argument(
         "--translation-verify",
         choices=("always", "never"),
-        default="always",
-        help="Semantically review each successfully translated study page",
+        default="never",
+        help=(
+            "Semantically review each successfully translated study page; "
+            "disabled by default"
+        ),
     )
     parser.add_argument(
         "--translation-provider",

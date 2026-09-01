@@ -167,10 +167,14 @@ DeepL MCP对每个OCR区域单独翻译，避免批量分隔符被改写后导�
 翻译若相比原文异常膨胀，会标记`translation_suspicious_expansion`
 进入人工复核。
 
-配置中`translation_verify: always`会在每个成功翻译的页面上调用一次
-Qwen语义复核。它会检查译义、数学术语、双关语、数字和遗漏，但只产生
-`translation_semantic_issue`和建议译文，绝不自动覆盖DeepL结果。如需节省此项
-模型调用，可在配置中改为`never`。
+DeepL翻译后的语义复核默认关闭，配置文件使用`translation_verify`控制：
+`never`不调用复核模型，`always`会在每个成功翻译的页面上调用一次Qwen语义复核。
+语义复核会检查译义、数学术语、双关语、数字和遗漏，但只产生
+`translation_semantic_issue`和建议译文，绝不自动覆盖DeepL结果。需要开启时写入：
+
+```json
+"translation_verify": "always"
+```
 
 如果只需要对已保存的英中译文进行语义复核，不重新OCR、不调用DeepL、
 不改动译文，使用：
@@ -188,6 +192,111 @@ python3 ocr_demo.py \
 合并回原有总清单和30页`study.html`。
 复核模型偶尔可能只给出问题说明而没有建议译文；此类记录仍会保留为人工
 复核项，不会导致整页复核结果被丢弃。
+
+### 独立页级Codex最终复核（实验性）
+
+`codex_page_review.py`只从`page-NNNN.json`的`study.regions`提取英文、当前译文
+和同页区域上下文，并可按需把同名PNG交给本机Codex CLI直接裁决。它不会读取或发送
+页面Markdown、`issues`、`translation_verifier_comparison`或`study.skipped`。
+脚本复用`codex login`保存的ChatGPT登录，
+会从子进程环境移除`OPENAI_API_KEY`和`CODEX_API_KEY`，不使用API Platform余额。
+首次使用前需在终端运行`codex login`并选择ChatGPT登录。
+
+模型和推理强度只在`ocr_config.json`中配置，例如：
+
+```json
+"codex_page_review": {
+  "command": "codex",
+  "model": "gpt-5.6-terra",
+  "reasoning_effort": "high",
+  "timeout_seconds": 1800,
+  "image_mode": "on_demand",
+  "require_chatgpt_login": true
+}
+```
+
+`image_mode`支持：
+
+- `on_demand`：默认。第一阶段只传文本；仅当某个区域明确需要图片证据时，
+  第二阶段才附加PNG并只复核这些区域；
+- `never`：始终不传图片；
+- `always`：第一阶段直接附加整页图片。
+
+先做不调用Codex的本地输入检查：
+
+```powershell
+python .\codex_page_review.py `
+  --config .\ocr_config.json `
+  --page-json .\runs\study-batch-01\pages\page-0053.json `
+  --dry-run
+```
+
+确认后由用户运行真实复核：
+
+```powershell
+python .\codex_page_review.py `
+  --config .\ocr_config.json `
+  --page-json .\runs\study-batch-01\pages\page-0053.json
+```
+
+为兼容旧命令，`--page-md page-NNNN.md`仍可使用，但它只把文件名转换为同目录的
+`page-NNNN.json`路径；Markdown本身不读取、不校验，也不进入输入哈希。
+
+Codex在`read-only`沙箱中运行；脚本通过内部`reviewed_region_ids`验证
+`study.regions`的全部区域都已检查。
+最终文件的`decisions`只保存真正改变译文的`replace/normalize`项；当前译文可接受的
+区域不会输出冗余决定。脚本在返回后重新核对实际使用的页面JSON和可选PNG的
+SHA-256，验证成功后才原子写入
+`page-NNNN-codex-review.json`。该实验性结果目前不会写回
+页面JSON，也尚未由现有PDF回填入口自动读取；待独立验证通过后再集成最终译文快照。
+结果中的`codex.usage`记录当次复核的`input_tokens`、`cached_input_tokens`、
+`non_cached_input_tokens`、`output_tokens`、`reasoning_output_tokens`和`total_tokens`。
+其中`reasoning_output_tokens`是输出Token的细分统计，不会再次加到`total_tokens`。
+`codex.stages`分别记录`text`和可选`image`阶段的目标区域、耗时与Token；顶层
+`codex.usage`是所有实际执行阶段的合计。
+
+### 整书按目录拆分的Codex最终复核（实验性）
+
+`codex_book_review.py`直接连接本机`codex app-server`，不依赖Python SDK或API Key。
+目录解析规则和最终裁决规则通过`thread/start.developerInstructions`设置；用户消息只包含
+目录页图片或当前页面的`study.regions`。每个前置内容/正式章节使用一个可恢复的持久
+thread，从而在同章连续页面之间复用稳定前缀并记录缓存Token。
+
+先让Codex解析用户指定的目录PDF页并生成任务计划：
+
+```powershell
+python .\codex_book_review.py plan `
+  --config .\ocr_config.json `
+  --pdf ".\book\beast academy math guide 3A.pdf" `
+  --toc-pages 5-6 `
+  --output .\runs\book-review-3A
+```
+
+计划文件为`book-review-plan.json`。程序核对PDF SHA-256、目录图片、目录条目顺序、
+印刷页码到PDF页码偏移和任务范围。封面、版权/出版信息和目录页默认组成独立
+`preliminary`翻译任务；只有传`--exclude-preliminary`或在配置中显式启用时才排除。
+`Index`、`Appendix`、`Answers`和`Glossary`仍默认进入`excluded_ranges`；如确需包含，
+可传`--include-back-matter`重新生成计划。
+
+当计划覆盖范围内的`page-NNNN.json`已经由主OCR/翻译流程生成后，先做本地检查：
+
+```powershell
+python .\codex_book_review.py review `
+  --config .\ocr_config.json `
+  --pdf ".\book\beast academy math guide 3A.pdf" `
+  --pages-dir .\runs\study-batch-3A\pages `
+  --output .\runs\book-review-3A `
+  --dry-run
+```
+
+去掉`--dry-run`后开始逐章复核。脚本在`book-review-checkpoint.json`保存每章thread ID
+和已完成页，重启后自动`thread/resume`；每页独立结果写到
+`chapters/<task-id>/page-NNNN-codex-review.json`，全书汇总写到
+`book-codex-review-summary.json`。原页面JSON、`manifest.json`和`study.html`不会修改。
+
+`codex_book_review`配置会继承`codex_page_review`中未重复指定的模型资料；默认仍为
+`gpt-5.6-terra`、`high`和`on_demand`。每轮输出同时记录`input_tokens`、
+`cached_input_tokens`、`cache_write_input_tokens`、`non_cached_input_tokens`、输出和总Token。
 
 ### 整章文本盲审
 
@@ -257,6 +366,51 @@ python3 ocr_demo.py \
 都会停止应用，避免把旧裁决套用到新译文。
 
 ### 生成纯中文版PDF
+
+新的整书流程不再依赖`ocr_demo.py`，并把最终合并、英文擦除和中文写入完全拆开。
+
+先把全部章节Codex裁决合并为旧回写入口兼容的锁定快照和坐标计划：
+
+```powershell
+python .\codex_book_finalize.py `
+  --config .\ocr_config.json `
+  --book-review-dir .\runs\book-review-3A `
+  --dry-run
+
+python .\codex_book_finalize.py `
+  --config .\ocr_config.json `
+  --book-review-dir .\runs\book-review-3A
+```
+
+该脚本不调用模型。它验证书本计划、PDF和页面JSON SHA-256、全部`page + region id`、
+稀疏裁决的当前译文、每章持久thread一致性及未解决人工项，然后生成：
+
+- `book-codex-adjudication.json`：整书裁决聚合审计；
+- `chapter_translation_final.json`：与旧回写方法格式一致的锁定最终译文快照；
+- `pdf_backfill_plan.json`：最终译文到DeepSeek-OCR坐标的确定性映射。
+
+英文擦除只由`erase_english_from_deepseek.py`完成。所有需翻译页生成
+`page-NNNN.cleaned.png`后，纯回写器只把这些cleaned PNG作为页面底图并写入中文：
+
+```powershell
+python .\pdf_translation_writer.py `
+  --config .\ocr_config.json `
+  --cleaned-pages-dir .\runs\study-batch-3A\erase `
+  --dry-run
+
+python .\pdf_translation_writer.py `
+  --config .\ocr_config.json `
+  --cleaned-pages-dir .\runs\study-batch-3A\erase
+```
+
+`pdf_translation_writer.py`不包含mask、redaction、inpaint或其他擦除实现，也不导入
+`erase_english_from_deepseek.py`。它要求每个快照页恰好存在一张cleaned PNG；未翻译的
+后置页直接保留原PDF页面。输出保持原PDF完整页数，程序报告明确记录
+`writer_performed_erasure=false`。程序检查通过仍只表示`program_checked`，最终视觉
+接受必须由用户确认。
+
+以下`ocr_demo.py --build-final-translation/--export-pdf`属于旧兼容流程，计划随
+`ocr_demo.py`一起废弃，不应用于新的整书任务。
 
 PDF回填是独立后处理阶段，不重新调用OCR、DeepL、逐页复核或整章模型。
 先生成完整且锁定的最终译文快照：
@@ -353,6 +507,24 @@ runs/small-batch-01/
 JSON包含模型、模式、状态、耗时、Token、OCR原文、风险标记和复核比较；
 学习模式还包含逐条英文、中文和已跳过内容，
 不保存API密钥、OAuth令牌或请求头。
+
+如果只需要逐页JSON，不需要逐页Markdown，请改用独立入口
+`ocr_json_pipeline.py`。它仍会生成`manifest.json`、`summary.md`和学习模式的
+`study.html`，并保留OCR、OCR复核与DeepL翻译流程：
+
+```powershell
+python .\ocr_json_pipeline.py `
+  --pdf ".\book\beast academy math guide 3A.pdf" `
+  --pages "1-100" `
+  --output ".\runs\study-batch-3A" `
+  --mode study `
+  --workers 2 `
+  --verify auto
+```
+
+使用`--resume`续跑时，该入口只要求已有的`page-NNNN.json`，不会要求被省略的
+`page-NNNN.md`。如需每页都调用OCR复核模型，将`--verify auto`改成
+`--verify always`。
 
 ## 测试
 

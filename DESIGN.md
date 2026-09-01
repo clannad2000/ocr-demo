@@ -116,8 +116,23 @@ Codex读取整章报告、原英文、当前译文、紧邻上下文和术语表
 对依赖图形、气泡归属或旋转/翻转的候选，Codex先查看局部图或整页图。
 人工复核不是必经阶段，清单可以为空。
 
-当前局限：`ocr_demo.py`已能验证和应用已保存的Codex裁决JSON，但不会自动调用
-Codex API生成裁决文件；当前由Codex任务读取结果后生成。
+`ocr_demo.py`已能验证和应用已保存的整章Codex裁决JSON，但不会自动调用Codex API
+生成裁决文件；整章裁决仍由Codex任务读取结果后生成。另有实验性的
+`codex_page_review.py`通过本机ChatGPT登录的`codex exec`对单页进行独立裁决；其
+唯一文本证据是页面JSON中的`study.regions`，不读取页面Markdown、逐页`issues`、
+`translation_verifier_comparison`或`study.skipped`。结果
+只写入`page-NNNN-codex-review.json`。页级结果只保留真正改变译文的
+`replace/normalize`项，不保存未改变译文的冗余决定；该结果尚未接入整章裁决或
+PDF回填入口。默认采用按需图片两阶段模式：先做纯文本裁决，只对明确依赖视觉证据的
+区域启动第二次带图调用；结果分别记录各阶段和合计Token。
+
+实验性的整书入口`codex_book_review.py`进一步使用本机`codex app-server`：目录解析和
+页级裁决规则位于独立`developerInstructions`，用户输入只承载目录图片或页面
+`study.regions`证据。目录解析先形成带PDF哈希的`book-review-plan.json`，再为前置内容
+和每个正式章节建立一个持久thread；检查点保存thread ID和已完成页，以便跨进程恢复。
+封面、出版信息和目录页默认组成独立`preliminary`任务；
+Index/Appendix/Answers/Glossary默认不生成翻译任务。该入口仍只生成独立裁决文件，
+不会直接改页面JSON、manifest或基础HTML。
 
 ### 5.5 生成裁决版
 
@@ -126,6 +141,18 @@ Codex API生成裁决文件；当前由Codex任务读取结果后生成。
 `discard`的最终译文必须与当前译文相同。原页面JSON、`manifest.json`、`study.html`和PDF不变。
 
 ### 5.6 最终译文快照与PDF回填
+
+整书新流程由两个不依赖`ocr_demo.py`的入口承担：
+
+- `codex_book_finalize.py`验证并聚合各章节稀疏裁决，生成兼容的
+  `chapter_translation_final.json`和`pdf_backfill_plan.json`；
+- `pdf_translation_writer.py`读取锁定快照、坐标计划和外部生成的
+  `page-NNNN.cleaned.png`，只执行中文排版与PDF生成。
+
+英文擦除完全属于`erase_english_from_deepseek.py`。新写入器不包含或调用mask、
+redaction、inpaint等擦除代码。翻译范围外的页面从原PDF原样复制，因此最终PDF保持
+整本书页数。旧`pdf_backfill.export_chinese_pdf`仅保留给`ocr_demo.py`兼容路径，
+不再是新流程依赖。
 
 `--build-final-translation`将页面JSON中的全部区域、Codex裁决和可选人工译文覆盖
 合并为`chapter_translation_final.json`。优先级是“人工覆盖 > Codex裁决 > 已保存
