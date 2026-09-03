@@ -115,7 +115,9 @@ class CodexBookFinalizeTests(unittest.TestCase):
         self.assertEqual(region["translation"], "你好！")
         self.assertEqual(region["codex_adjudication"]["decision"], "replace")
         self.assertEqual(aggregate["decision_count"], 1)
-        self.assertEqual(aggregate["persistent_threads"], {"preliminary": "thread-preliminary"})
+        self.assertEqual(
+            aggregate["persistent_threads"], {"preliminary": ["thread-preliminary"]}
+        )
 
     def test_unresolved_human_review_blocks_finalization(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

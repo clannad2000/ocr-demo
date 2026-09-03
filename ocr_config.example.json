@@ -61,7 +61,36 @@
     "exclude_back_matter": true,
     // 正文页仍采用先文本、必要时再附图的两阶段模式。
     "image_mode": "on_demand",
-    "require_chatgpt_login": true
+    "require_chatgpt_login": true,
+    // 连续页面动态合批与线程分段。所有页面、区域和Token目标都是软目标，页面不会因略超目标而拆开。
+    "batching": {
+      // true按内容合并同一章节内的连续页面；false退回单页批次和每章节一个线程。
+      "enabled": true,
+      // 每批期望页数；内容很少时可达到或略超该值，章节边界永远不会跨越。
+      "target_pages": 6,
+      // 每批期望区域数；加入一个完整页面后允许略超，不是拒绝请求的硬上限。
+      "target_regions": 50,
+      // 每批新增页面证据与输出Schema的估算Token目标；固定Codex提示开销不计入此软目标。
+      "target_tokens": 12000,
+      // 本地预估使用的平均字符/Token，仅用于装箱和提前换线程，不代表服务端精确计数。
+      "estimated_chars_per_token": 3.0,
+      // 通常在约4个批次后寻找线程分段点，并通过后面的最大批次数平衡尾批次。
+      "thread_target_batches": 4,
+      // 正常线程段最多安排6个批次；上下文硬限制仍可让程序更早建立新线程。
+      "thread_max_batches": 6,
+      // 当前复核模型的上下文窗口；更换模型时必须同步为该模型官方值。
+      "model_context_window_tokens": 1050000,
+      // 预计输入加生成预留不得超过模型窗口的90%；这是唯一不可越过的容量比例。
+      "context_hard_ratio": 0.90,
+      // 为可见输出和reasoning保留的Token，参与90%硬限制计算。
+      "generation_reserve_tokens": 64000,
+      // 新线程尚无实测usage时，用于估算Codex固定指令、工具和协议前缀。
+      "fixed_prompt_overhead_tokens": 20000,
+      // 每批返回的累计一致性摘要最大字符数，防止跨线程上下文再次无限增长。
+      "consistency_summary_max_chars": 4000,
+      // 新线程首批显式携带translation.custom_instructions作为固定术语和翻译规则。
+      "use_translation_custom_instructions": true
+    }
   },
   // 纯中文回写器：只消费erase_english_from_deepseek.py生成的cleaned PNG，不执行擦除。
   "pdf_translation_writer": {

@@ -172,7 +172,7 @@ def merge_book_reviews(
     decisions: list[dict[str, Any]] = []
     page_hashes: dict[str, str] = {}
     review_hashes: dict[str, str] = {}
-    thread_ids: dict[str, str] = {}
+    thread_ids: dict[str, list[str]] = {}
     for page, task in sorted(tasks_by_page.items()):
         page_json = pages_dir / f"page-{page:04d}.json"
         review_path = (
@@ -221,14 +221,11 @@ def merge_book_reviews(
         ]
         codex = review.get("codex", {})
         if isinstance(codex, dict) and isinstance(codex.get("thread_id"), str):
-            existing = thread_ids.get(str(task["task_id"]))
-            if existing is not None and existing != codex["thread_id"]:
-                raise FinalizeError(
-                    f"Task {task['task_id']} unexpectedly uses multiple persistent threads"
-                )
-            thread_ids[str(task["task_id"])] = codex["thread_id"]
+            task_threads = thread_ids.setdefault(str(task["task_id"]), [])
+            if codex["thread_id"] not in task_threads:
+                task_threads.append(codex["thread_id"])
     aggregate = {
-        "schema_version": 1,
+        "schema_version": 2,
         "kind": "codex_book_adjudication",
         "status": "validated_complete",
         "source_pdf": str(source_pdf),

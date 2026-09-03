@@ -128,8 +128,14 @@ PDF回填入口。默认采用按需图片两阶段模式：先做纯文本裁�
 
 实验性的整书入口`codex_book_review.py`进一步使用本机`codex app-server`：目录解析和
 页级裁决规则位于独立`developerInstructions`，用户输入只承载目录图片或页面
-`study.regions`证据。目录解析先形成带PDF哈希的`book-review-plan.json`，再为前置内容
-和每个正式章节建立一个持久thread；检查点保存thread ID和已完成页，以便跨进程恢复。
+`study.regions`证据。目录解析先形成带PDF哈希的`book-review-plan.json`，再在每个前置
+内容或正式章节内部把连续页面按内容软目标合成批次，并把约4–6个批次分配给一个持久
+thread段；检查点保存批次/线程映射、一致性摘要、thread ID和已完成页，以便跨进程恢复。
+模型窗口比例只作为包含生成预留的容量硬限制，不把页面、区域或批次Token软目标当作
+拒绝边界。新thread首批显式传入固定翻译规则、章节标题和受长度限制的累计一致性摘要；
+批次先整体验证全部`page + region id`和输入哈希，再原子拆出兼容的逐页裁决文件。
+裁决响应以`region id`为键，当前译文一律由程序从锁定页面证据补回，杜绝模型回显改写
+不可变证据；协议版本升级时保留已完成页、重建未完成批次并启用新线程段。
 封面、出版信息和目录页默认组成独立`preliminary`任务；
 Index/Appendix/Answers/Glossary默认不生成翻译任务。该入口仍只生成独立裁决文件，
 不会直接改页面JSON、manifest或基础HTML。

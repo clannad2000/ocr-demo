@@ -8,6 +8,34 @@ import codex_page_review as page
 
 
 class CodexBookReviewTests(unittest.TestCase):
+    @staticmethod
+    def make_page_inputs(
+        root: pathlib.Path, page_number: int, region_count: int
+    ) -> page.PageReviewInputs:
+        page_json = root / f"page-{page_number:04d}.json"
+        page_json.write_text(
+            json.dumps(
+                {
+                    "page": page_number,
+                    "mode": "study",
+                    "study": {
+                        "regions": [
+                            {
+                                "id": f"r{index:03d}",
+                                "type": "question",
+                                "source_text": f"Question {index}",
+                                "translation": f"问题{index}",
+                            }
+                            for index in range(1, region_count + 1)
+                        ]
+                    },
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        return page.load_page_inputs(page_json, include_image=False)
+
     def test_parse_page_spec(self) -> None:
         self.assertEqual(book.parse_page_spec("6,5-6,8"), [5, 6, 8])
         with self.assertRaisesRegex(book.BookReviewError, "Invalid page range"):
@@ -34,6 +62,267 @@ class CodexBookReviewTests(unittest.TestCase):
         self.assertEqual(settings.model, "gpt-5.6-terra")
         self.assertEqual(settings.reasoning_effort, "high")
         self.assertTrue(settings.exclude_back_matter)
+
+    def test_example_config_parses_annotated_batching_settings(self) -> None:
+        config = pathlib.Path(book.__file__).resolve().with_name(
+            "ocr_config.example.json"
+        )
+        settings, _data = book.load_settings(config)
+        self.assertTrue(settings.batching_enabled)
+        self.assertEqual(settings.batch_target_pages, 6)
+        self.assertEqual(settings.thread_target_batches, 4)
+        self.assertEqual(settings.thread_max_batches, 6)
+        self.assertEqual(settings.model_context_window_tokens, 1050000)
+        self.assertEqual(settings.context_hard_ratio, 0.90)
+        self.assertTrue(settings.fixed_translation_instructions)
+
+    def test_content_batches_use_soft_targets_and_preserve_gaps(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            inputs = [
+                self.make_page_inputs(root, 1, 3),
+                self.make_page_inputs(root, 2, 3),
+                self.make_page_inputs(root, 4, 1),
+            ]
+            settings = book.BookSettings(
+                batch_target_pages=6,
+                batch_target_regions=5,
+                batch_target_tokens=100000,
+            )
+            batches = book.plan_task_batches(
+                {"task_id": "chapter-01", "title": "Shapes"},
+                inputs,
+                settings,
+            )
+        self.assertEqual([item["pages"] for item in batches], [[1, 2], [4]])
+        self.assertEqual(batches[0]["region_count"], 6)
+
+    def test_nine_batches_are_balanced_into_five_and_four(self) -> None:
+        settings = book.BookSettings(
+            thread_target_batches=4,
+            thread_max_batches=6,
+        )
+        batches = [{"batch_id": str(index)} for index in range(9)]
+        groups = book.group_batches_for_threads(batches, settings)
+        self.assertEqual([len(group) for group in groups], [5, 4])
+
+    def test_batch_response_is_validated_and_split_by_page(self) -> None:
+        class FakeServer:
+            def run_turn(self, **kwargs):
+                schema = kwargs["output_schema"]
+                batch_id = schema["properties"]["batch_id"]["const"]
+                page_results = {}
+                for key, page_schema in schema["properties"]["page_results"][
+                    "properties"
+                ].items():
+                    page_number = page_schema["properties"]["page"]["const"]
+                    region_ids = page_schema["properties"]["reviewed_region_ids"][
+                        "items"
+                    ]["enum"]
+                    page_results[key] = {
+                        "page": page_number,
+                        "reviewed_region_ids": region_ids,
+                        "decisions_by_id": (
+                            {
+                                "r001": {
+                                    "decision": "normalize",
+                                    "final_translation": "统一后的问题1",
+                                    "reason": "保持术语一致。",
+                                    "confidence": "high",
+                                    "child_note": "",
+                                }
+                            }
+                            if page_number == 10
+                            else {}
+                        ),
+                        "human_review": [],
+                        "summary": "acceptable",
+                    }
+                return book.TurnResult(
+                    thread_id=kwargs["thread_id"],
+                    turn_id="turn-1",
+                    response={
+                        "batch_id": batch_id,
+                        "page_results": page_results,
+                        "consistency_summary": "Use 直角 consistently.",
+                    },
+                    usage={
+                        "available": True,
+                        "input_tokens": 100,
+                        "cached_input_tokens": 0,
+                        "cache_write_input_tokens": 0,
+                        "non_cached_input_tokens": 100,
+                        "output_tokens": 10,
+                        "reasoning_output_tokens": 2,
+                        "total_tokens": 110,
+                    },
+                    elapsed_seconds=0.1,
+                )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            inputs = [
+                self.make_page_inputs(root, 10, 1),
+                self.make_page_inputs(root, 11, 1),
+            ]
+            settings = book.BookSettings(image_mode="never")
+            task = {"task_id": "chapter-01", "title": "Shapes"}
+            descriptor = book.make_batch_descriptor(task, inputs, settings)
+            results, batch_record, summary = book.review_page_batch(
+                FakeServer(),
+                thread_id="thread-1",
+                task=task,
+                descriptor=descriptor,
+                settings=settings,
+                bootstrap_context=True,
+                previous_consistency_summary="",
+            )
+        self.assertEqual([result["page"] for result in results], [10, 11])
+        self.assertEqual(results[0]["codex"]["usage_scope"], "shared_batch")
+        self.assertEqual(results[0]["decisions"][0]["id"], "r001")
+        self.assertEqual(results[0]["decisions"][0]["current_translation"], "问题1")
+        self.assertEqual(batch_record["pages"], [10, 11])
+        self.assertEqual(summary, "Use 直角 consistently.")
+
+    def test_execute_review_locks_batches_and_never_crosses_tasks(self) -> None:
+        class FakeServer:
+            def __init__(self):
+                self.thread_number = 0
+
+            def start_thread(self, **_kwargs):
+                self.thread_number += 1
+                return f"thread-{self.thread_number}"
+
+            def resume_thread(self, thread_id):
+                return thread_id
+
+            def run_turn(self, **kwargs):
+                schema = kwargs["output_schema"]
+                batch_id = schema["properties"]["batch_id"]["const"]
+                page_results = {}
+                for key, page_schema in schema["properties"]["page_results"][
+                    "properties"
+                ].items():
+                    page_results[key] = {
+                        "page": page_schema["properties"]["page"]["const"],
+                        "reviewed_region_ids": page_schema["properties"][
+                            "reviewed_region_ids"
+                        ]["items"]["enum"],
+                        "decisions_by_id": {},
+                        "human_review": [],
+                        "summary": "acceptable",
+                    }
+                return book.TurnResult(
+                    thread_id=kwargs["thread_id"],
+                    turn_id=f"turn-{batch_id}",
+                    response={
+                        "batch_id": batch_id,
+                        "page_results": page_results,
+                        "consistency_summary": "stable terms",
+                    },
+                    usage={
+                        "available": True,
+                        "input_tokens": 100,
+                        "cached_input_tokens": 0,
+                        "cache_write_input_tokens": 0,
+                        "non_cached_input_tokens": 100,
+                        "output_tokens": 10,
+                        "reasoning_output_tokens": 2,
+                        "total_tokens": 110,
+                    },
+                    elapsed_seconds=0.1,
+                )
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            pages_dir = root / "pages"
+            pages_dir.mkdir()
+            for page_number in range(1, 7):
+                self.make_page_inputs(pages_dir, page_number, 1)
+            plan = {
+                "tasks": [
+                    {
+                        "task_id": "chapter-01",
+                        "title": "One",
+                        "pdf_start_page": 1,
+                        "pdf_end_page": 4,
+                    },
+                    {
+                        "task_id": "chapter-02",
+                        "title": "Two",
+                        "pdf_start_page": 5,
+                        "pdf_end_page": 6,
+                    },
+                ]
+            }
+            plan_path = root / "book-review-plan.json"
+            plan_path.write_text(json.dumps(plan), encoding="utf-8")
+            output_dir = root / "output"
+            settings = book.BookSettings(
+                image_mode="never",
+                batch_target_pages=2,
+                batch_target_regions=100,
+                batch_target_tokens=100000,
+                thread_target_batches=1,
+                thread_max_batches=1,
+            )
+            summary = book.execute_review(
+                FakeServer(),
+                plan=plan,
+                plan_path=plan_path,
+                pages_dir=pages_dir,
+                output_dir=output_dir,
+                settings=settings,
+                workspace=root,
+                force=False,
+            )
+            batch_plan = json.loads(
+                (output_dir / "book-review-batch-plan.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            initial_batch_pages = [
+                batch["pages"]
+                for task in batch_plan["tasks"]
+                for segment in task["segments"]
+                for batch in segment["batches"]
+            ]
+            batch_plan["schema_version"] = 1
+            batch_plan["settings"].pop("batch_response_schema_version")
+            (output_dir / "book-review-batch-plan.json").write_text(
+                json.dumps(batch_plan), encoding="utf-8"
+            )
+            migrated_summary = book.execute_review(
+                FakeServer(),
+                plan=plan,
+                plan_path=plan_path,
+                pages_dir=pages_dir,
+                output_dir=output_dir,
+                settings=settings,
+                workspace=root,
+                force=False,
+            )
+            batch_plan = json.loads(
+                (output_dir / "book-review-batch-plan.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+        self.assertEqual(summary["pages_reviewed"], 6)
+        self.assertEqual(migrated_summary["pages_reviewed"], 6)
+        self.assertEqual(summary["batches"], 3)
+        self.assertEqual(batch_plan["schema_version"], book.BATCH_PLAN_SCHEMA_VERSION)
+        self.assertEqual(
+            [task["task_id"] for task in batch_plan["tasks"]],
+            ["chapter-01", "chapter-02"],
+        )
+        self.assertEqual(
+            initial_batch_pages,
+            [[1, 2], [3, 4], [5, 6]],
+        )
+        self.assertEqual(
+            [task["reused_pages"] for task in batch_plan["tasks"]],
+            [[1, 2, 3, 4], [5, 6]],
+        )
 
     @staticmethod
     def toc_response() -> dict:

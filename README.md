@@ -259,8 +259,10 @@ SHA-256，验证成功后才原子写入
 
 `codex_book_review.py`直接连接本机`codex app-server`，不依赖Python SDK或API Key。
 目录解析规则和最终裁决规则通过`thread/start.developerInstructions`设置；用户消息只包含
-目录页图片或当前页面的`study.regions`。每个前置内容/正式章节使用一个可恢复的持久
-thread，从而在同章连续页面之间复用稳定前缀并记录缓存Token。
+目录页图片或当前批次页面的`study.regions`。程序只在同一个前置内容/正式章节内合并
+连续页面，根据页面数、区域数和序列化Token软目标动态装箱；一个线程段通常承载4–6个
+批次。新线程首批显式携带`translation.custom_instructions`、章节标题和上一批次保存的
+精简一致性摘要，不会把跨章节页面放入同一批次或线程。
 
 先让Codex解析用户指定的目录PDF页并生成任务计划：
 
@@ -289,14 +291,24 @@ python .\codex_book_review.py review `
   --dry-run
 ```
 
-去掉`--dry-run`后开始逐章复核。脚本在`book-review-checkpoint.json`保存每章thread ID
-和已完成页，重启后自动`thread/resume`；每页独立结果写到
+去掉`--dry-run`后开始逐章复核。脚本先生成带配置快照和输入哈希的
+`book-review-batch-plan.json`并锁定批次边界；配置或输入变化时必须显式使用`--force`
+重建。脚本自身升级批次响应协议时，会保留已完成页并自动重建未完成批次，且使用新的
+线程段，避免恢复旧协议的线程。`book-review-checkpoint.json`保存批次到线程段的
+映射、thread ID、一致性摘要和已完成页，重启后自动`thread/resume`；批次审计结果写到
+`batches/<task-id>/`，验证完整批次后再把每页独立结果写到
 `chapters/<task-id>/page-NNNN-codex-review.json`，全书汇总写到
 `book-codex-review-summary.json`。原页面JSON、`manifest.json`和`study.html`不会修改。
 
 `codex_book_review`配置会继承`codex_page_review`中未重复指定的模型资料；默认仍为
 `gpt-5.6-terra`、`high`和`on_demand`。每轮输出同时记录`input_tokens`、
 `cached_input_tokens`、`cache_write_input_tokens`、`non_cached_input_tokens`、输出和总Token。
+`codex_book_review.batching`中的页面、区域和新增Token值都是允许加入完整页面后略超的
+软目标；容量硬限制按“预计输入 + 生成预留不超过模型上下文窗口的指定比例”计算。
+更换模型时必须同步更新`model_context_window_tokens`。同一批次各逐页结果引用共享的
+批次usage，全书汇总按`batch_id`去重，避免重复累计。
+为避免模型回显时改写证据文本，批次响应的裁决以`region id`为键，只提交决定和最终译文；
+程序从不可变的页面输入补回当前译文后再做严格验证。
 
 ### 整章文本盲审
 
