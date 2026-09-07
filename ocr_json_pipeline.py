@@ -7,8 +7,7 @@ tools. API credentials are read from process environment variables or a project
 
 This variant writes page PNG and JSON records but omits
 ``pages/page-NNNN.md``. It still writes ``manifest.json``, ``summary.md``, and
-``study.html`` in study mode. DeepL translation semantic review is disabled by
-default and can be enabled with ``translation_verify: always`` in the config.
+``study.html`` in study mode. Translation is performed through DeepL Remote MCP.
 """
 
 from __future__ import annotations
@@ -218,23 +217,12 @@ DEFAULT_MODEL_PROFILES = {
         "enable_thinking": False,
         "max_tokens": 16384,
     },
-    "deepseek-v4": {
-        "provider": "deepseek",
-        "model": "deepseek-v4-pro",
-        "api_key_name": "deepseek",
-        "chat_endpoint": "https://api.deepseek.com/chat/completions",
-        "enable_thinking": False,
-        "max_tokens": 16384,
-    },
 }
 
 DEFAULT_MODEL_USAGE = {
     "layout_ocr": "deepseek-ocr",
     "primary_ocr": "qwen-flash",
     "ocr_verifier": "qwen-max",
-    "qwen_translation": "qwen-flash",
-    "translation_verifier": "qwen-max",
-    "chapter_review": ["qwen-max"],
 }
 
 print_lock = threading.Lock()
@@ -2677,30 +2665,11 @@ def build_summary(args: argparse.Namespace, records: list[dict[str, Any]]) -> No
             "layout": args.layout_model,
             "primary": args.primary_model,
             "verifier": args.verifier_model,
-            "translation_verifier": (
-                args.translation_verifier_model if args.mode == "study" else None
-            ),
-            "chapter_review": (
-                [
-                    config["model"]
-                    for config in args.resolved_chapter_review_models
-                ]
-                if args.mode == "study"
-                else None
-            ),
             "translation": (
                 {
-                    "provider": args.translation_provider,
-                    "model": (
-                        "DeepL Remote MCP"
-                        if args.translation_provider == "deepl_mcp"
-                        else args.translation_model
-                    ),
-                    "target_lang": (
-                        args.deepl_target_lang
-                        if args.translation_provider == "deepl_mcp"
-                        else "ZH-HANS"
-                    ),
+                    "provider": "deepl_mcp",
+                    "model": "DeepL Remote MCP",
+                    "target_lang": args.deepl_target_lang,
                 }
                 if args.mode == "study"
                 else None
@@ -2884,7 +2853,6 @@ ENV_API_KEY_NAMES = frozenset(
     {
         "SILICONFLOW_API_KEY",
         "DASHSCOPE_API_KEY",
-        "DEEPSEEK_API_KEY",
         "DEEPL_OAUTH_CREDENTIALS",
     }
 )
@@ -3016,16 +2984,6 @@ def load_config_defaults(config_path: pathlib.Path) -> dict[str, Any]:
         "printed_page_offset",
         "resume",
         "redo_pages",
-        "reanalyze",
-        "retranslate",
-        "reverify_translation",
-        "export_chapter_review",
-        "chapter_review",
-        "build_reviewed_study",
-        "build_final_translation",
-        "export_pdf",
-        "adjudication_file",
-        "translation_verify",
         "log_file",
     }
     if "api_keys" in data:
@@ -3038,16 +2996,15 @@ def load_config_defaults(config_path: pathlib.Path) -> dict[str, Any]:
         "model_profiles",
         "model_usage",
         "pdf_backfill",
+        "pdf_translation_writer",
         "codex_page_review",
+        "codex_book_review",
     }
     unknown = sorted(set(data) - allowed_fields)
     if unknown:
         raise ValueError(f"Unknown config fields: {', '.join(unknown)}")
 
     defaults = {field: data[field] for field in direct_fields if field in data}
-    translation_verify = defaults.get("translation_verify")
-    if translation_verify not in (None, "always", "never"):
-        raise ValueError("config.translation_verify must be 'always' or 'never'")
     model_profiles = data.get("model_profiles")
     if model_profiles is not None:
         if not isinstance(model_profiles, dict):
@@ -3071,6 +3028,8 @@ def load_config_defaults(config_path: pathlib.Path) -> dict[str, Any]:
     translation = data.get("translation", {})
     if not isinstance(translation, dict):
         raise ValueError("config.translation must be an object")
+    if translation.get("provider", "deepl_mcp") != "deepl_mcp":
+        raise ValueError("config.translation.provider must be 'deepl_mcp'")
     translation_fields = {
         "provider": "translation_provider",
         "endpoint": "deepl_mcp_endpoint",
@@ -3103,7 +3062,6 @@ def load_config_defaults(config_path: pathlib.Path) -> dict[str, Any]:
         "log_file",
         "pdftoppm_command",
         "deepl_bridge_script",
-        "adjudication_file",
     ):
         value = defaults.get(field)
         if not value:
@@ -3141,74 +3099,9 @@ def build_parser(defaults: dict[str, Any] | None = None) -> argparse.ArgumentPar
         "--redo-pages",
         help="With --resume, rerun only these pages and reuse all other page results",
     )
-    parser.add_argument(
-        "--reanalyze",
-        action="store_true",
-        help="Recompute flags from existing page JSON without API calls",
-    )
-    parser.add_argument(
-        "--retranslate",
-        action="store_true",
-        help="Retranslate existing study OCR regions without repeating image OCR",
-    )
-    parser.add_argument(
-        "--reverify-translation",
-        action="store_true",
-        help="Review saved study translations without repeating OCR or translation",
-    )
-    parser.add_argument(
-        "--export-chapter-review",
-        action="store_true",
-        help="Export blind chapter-level review Markdown without API calls",
-    )
-    parser.add_argument(
-        "--chapter-review",
-        action="store_true",
-        help="Run one blind text-only chapter-level translation review",
-    )
-    parser.add_argument(
-        "--build-reviewed-study",
-        action="store_true",
-        help="Apply a saved Codex adjudication to a separate reviewed HTML copy",
-    )
-    parser.add_argument(
-        "--build-final-translation",
-        action="store_true",
-        help="Build a complete locked final-translation snapshot without APIs",
-    )
-    parser.add_argument(
-        "--export-pdf",
-        choices=("chinese",),
-        help="Export a reviewed PDF edition without repeating OCR or translation",
-    )
-    parser.add_argument("--adjudication-file", type=pathlib.Path)
     parser.add_argument("--layout-profile")
     parser.add_argument("--primary-profile")
     parser.add_argument("--verifier-profile")
-    parser.add_argument("--translation-profile")
-    parser.add_argument("--translation-verifier-profile")
-    parser.add_argument(
-        "--chapter-review-profile",
-        action="append",
-        help=(
-            "Temporary chapter-review profile selection; repeat to compare "
-            "multiple profiles instead of config.model_usage.chapter_review"
-        ),
-    )
-    parser.add_argument(
-        "--translation-verify",
-        choices=("always", "never"),
-        default="never",
-        help=(
-            "Semantically review each successfully translated study page; "
-            "disabled by default"
-        ),
-    )
-    parser.add_argument(
-        "--translation-provider",
-        choices=("deepl_mcp", "qwen"),
-        default="deepl_mcp",
-    )
     parser.add_argument("--deepl-mcp-endpoint", default=DEEPL_MCP_ENDPOINT)
     parser.add_argument("--deepl-source-lang", default="EN")
     parser.add_argument("--deepl-target-lang", default="ZH-HANS")
@@ -3241,6 +3134,17 @@ def build_parser(defaults: dict[str, Any] | None = None) -> argparse.ArgumentPar
         },
         model_usage=dict(DEFAULT_MODEL_USAGE),
         pdf_backfill={},
+        translation_provider="deepl_mcp",
+        translation_verify="never",
+        reanalyze=False,
+        retranslate=False,
+        reverify_translation=False,
+        export_chapter_review=False,
+        chapter_review=False,
+        build_reviewed_study=False,
+        build_final_translation=False,
+        export_pdf=None,
+        adjudication_file=None,
     )
     if defaults:
         parser.set_defaults(**defaults)
@@ -3265,7 +3169,6 @@ def resolve_model_configuration(args: argparse.Namespace) -> None:
     }
     key_values = {
         "dashscope": args.dashscope_key,
-        "deepseek": args.deepseek_key,
         "siliconflow": args.siliconflow_key,
     }
     resolved_profiles: dict[str, dict[str, Any]] = {}
@@ -3319,9 +3222,6 @@ def resolve_model_configuration(args: argparse.Namespace) -> None:
         "layout_ocr",
         "primary_ocr",
         "ocr_verifier",
-        "qwen_translation",
-        "translation_verifier",
-        "chapter_review",
     }
     unknown_usage = sorted(set(usage) - allowed_usage)
     if unknown_usage:
@@ -3332,15 +3232,10 @@ def resolve_model_configuration(args: argparse.Namespace) -> None:
         "layout_ocr": args.layout_profile,
         "primary_ocr": args.primary_profile,
         "ocr_verifier": args.verifier_profile,
-        "qwen_translation": args.translation_profile,
-        "translation_verifier": args.translation_verifier_profile,
     }
     for role, value in cli_overrides.items():
         if value:
             selected[role] = value
-    if args.chapter_review_profile:
-        selected["chapter_review"] = args.chapter_review_profile
-
     def profile_for(role: str) -> dict[str, Any]:
         name = selected.get(role)
         if not isinstance(name, str) or name not in resolved_profiles:
@@ -3350,15 +3245,9 @@ def resolve_model_configuration(args: argparse.Namespace) -> None:
     args.layout_profile_config = profile_for("layout_ocr")
     args.primary_profile_config = profile_for("primary_ocr")
     args.verifier_profile_config = profile_for("ocr_verifier")
-    args.translation_profile_config = profile_for("qwen_translation")
-    args.translation_verifier_profile_config = profile_for(
-        "translation_verifier"
-    )
     for role, profile in (
         ("layout_ocr", args.layout_profile_config),
         ("primary_ocr", args.primary_profile_config),
-        ("qwen_translation", args.translation_profile_config),
-        ("translation_verifier", args.translation_verifier_profile_config),
     ):
         if not profile["chat_endpoint"]:
             raise ValueError(f"Model profile for {role} has no chat_endpoint")
@@ -3366,34 +3255,11 @@ def resolve_model_configuration(args: argparse.Namespace) -> None:
         raise ValueError(
             "Model profile for ocr_verifier has no responses_endpoint"
         )
-    chapter_names = selected.get("chapter_review")
-    if not isinstance(chapter_names, list) or not chapter_names:
-        raise ValueError("model_usage.chapter_review must be a non-empty array")
     args.resolved_chapter_review_models = []
-    seen: set[str] = set()
-    for name in chapter_names:
-        if not isinstance(name, str) or name not in resolved_profiles:
-            raise ValueError(
-                f"model_usage.chapter_review references unknown profile: {name}"
-            )
-        if name in seen:
-            raise ValueError(f"Duplicate chapter review profile: {name}")
-        seen.add(name)
-        profile = dict(resolved_profiles[name])
-        if not profile["chat_endpoint"]:
-            raise ValueError(
-                f"Chapter review profile {name} has no chat_endpoint"
-            )
-        profile["endpoint"] = profile["chat_endpoint"]
-        args.resolved_chapter_review_models.append(profile)
 
     args.layout_model = args.layout_profile_config["model"]
     args.primary_model = args.primary_profile_config["model"]
     args.verifier_model = args.verifier_profile_config["model"]
-    args.translation_model = args.translation_profile_config["model"]
-    args.translation_verifier_model = args.translation_verifier_profile_config[
-        "model"
-    ]
 
 
 def resolve_pdf_backfill_settings(args: argparse.Namespace) -> dict[str, Any]:
@@ -3722,9 +3588,6 @@ def main() -> int:
     )
     args.dashscope_key = getattr(args, "dashscope_key", "") or os.environ.get(
         "DASHSCOPE_API_KEY", ""
-    )
-    args.deepseek_key = getattr(args, "deepseek_key", "") or os.environ.get(
-        "DEEPSEEK_API_KEY", ""
     )
     with TeeLogging(args.log_file):
         try:

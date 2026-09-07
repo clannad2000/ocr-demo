@@ -3,7 +3,7 @@
 
 The script performs no model calls and never mutates page JSON or Codex review
 results.  It writes the same locked final-translation snapshot consumed by the
-legacy ``ocr_demo.py`` PDF backfill path, plus its deterministic coordinate plan.
+the saved page records, plus their deterministic coordinate plan.
 """
 
 from __future__ import annotations

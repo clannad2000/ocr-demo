@@ -89,7 +89,7 @@ def require_pymupdf() -> Any:
     except ImportError as error:
         raise RuntimeError(
             "PDF backfill requires PyMuPDF. Either install it in an isolated "
-            "environment, or run only --build-final-translation and review "
+            "environment, or generate the locked final translation and review "
             "the generated snapshot without exporting a PDF."
         ) from error
     return fitz

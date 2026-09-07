@@ -289,7 +289,7 @@ def load_page_inputs(
         )
         if not translation.strip() or translation == "[translation missing]":
             raise CodexPageReviewError(
-                f"Region {region_id} has no saved translation; run --retranslate first"
+                f"Region {region_id} has no saved translation; rerun the OCR/DeepL stage first"
             )
         regions.append(
             {

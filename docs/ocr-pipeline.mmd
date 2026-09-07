@@ -1,36 +1,25 @@
 flowchart TD
   PDF["Source PDF - read only"] --> R["Poppler page rendering"]
-  R --> LO["Layout OCR - DeepSeek-OCR"]
-  R --> PO["Primary OCR - Qwen vision"]
+  R --> LO["Layout OCR - DeepSeek coordinates"]
+  R --> PO["Primary OCR - authoritative English"]
   LO --> DR["Deterministic page risk checks"]
   PO --> DR
   DR --> OV["Optional image OCR verifier"]
   PO --> SEL["Study-region selection"]
   SEL --> TR["DeepL region translation"]
-  TR --> TV["Page translation verifier"]
-  OV --> PAGE["Page JSON evidence"]
-  TV --> PAGE
-  PAGE --> BASE["study.html"]
-  PAGE --> BLIND["Blind chapter text package"]
-  BLIND --> QA["Chapter reviewer A"]
-  BLIND --> QB["Chapter reviewer B"]
-  QA --> CODEX["Codex evidence adjudication"]
-  QB --> CODEX
-  PAGE --> CODEX
-  CODEX -. "image-dependent item" .-> CROP["Local page or crop"]
-  CROP --> CODEX
-  CODEX -. "only if evidence remains insufficient" .-> HUMAN["Human review"]
-  CODEX --> ADJ["Auditable adjudication JSON"]
-  ADJ --> APPLY["Hash-checked copy-only application"]
-  PAGE --> APPLY
-  APPLY --> FINAL["study-reviewed.html"]
-  APPLY --> LOG["chapter_review-applied.json"]
-  APPLY --> SNAP["Locked final translation snapshot"]
-  LO --> MAP["Deterministic region mapping"]
-  SNAP --> MAP
-  MAP --> FILL["Rule-driven Chinese PDF backfill"]
-  PDF --> FILL
-  FILL --> PQA["Full program checks"]
-  PQA -. "optional small sample" .-> ASPOT["AI spot check"]
+  OV --> PAGE["Immutable page PNG and JSON"]
+  TR --> PAGE
+  PAGE --> BOOK["Codex chapter-persistent review"]
+  BOOK --> DEC["Independent review JSON"]
+  DEC --> FINALIZE["Hash-checked finalization"]
+  PAGE --> FINALIZE
+  FINALIZE --> SNAP["Locked final translation snapshot"]
+  FINALIZE --> MAP["Deterministic coordinate plan"]
+  PAGE --> ERASE["External English erasure"]
+  ERASE --> CLEAN["Cleaned page PNG"]
+  PDF --> WRITE["Chinese-only PDF writer"]
+  SNAP --> WRITE
+  MAP --> WRITE
+  CLEAN --> WRITE
+  WRITE --> PQA["Full program checks"]
   PQA --> HV["Human visual acceptance"]
-  ASPOT --> HV

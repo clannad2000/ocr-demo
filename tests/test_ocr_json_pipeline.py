@@ -9,30 +9,17 @@ import ocr_json_pipeline
 
 
 class OcrJsonPipelineTests(unittest.TestCase):
-    def test_module_has_no_ocr_demo_runtime_dependency(self):
-        source = pathlib.Path(ocr_json_pipeline.__file__).read_text(encoding="utf-8")
-        self.assertNotIn("import ocr_demo", source)
-        self.assertNotIn("from ocr_demo", source)
-
-    def test_translation_semantic_review_is_disabled_by_default(self):
-        args = ocr_json_pipeline.build_parser().parse_args([])
+    def test_removed_legacy_modes_are_not_public_cli_options(self):
+        parser = ocr_json_pipeline.build_parser()
+        args = parser.parse_args([])
         self.assertEqual(args.translation_verify, "never")
+        self.assertNotIn("--chapter-review", parser._option_string_actions)
 
-    def test_translation_semantic_review_can_be_enabled_by_config(self):
+    def test_config_rejects_removed_translation_semantic_review_switch(self):
         with tempfile.TemporaryDirectory() as temporary:
             config_path = pathlib.Path(temporary) / "ocr_config.json"
             config_path.write_text(
                 '{"translation_verify": "always"}', encoding="utf-8"
-            )
-            defaults = ocr_json_pipeline.load_config_defaults(config_path)
-            args = ocr_json_pipeline.build_parser(defaults).parse_args([])
-            self.assertEqual(args.translation_verify, "always")
-
-    def test_config_rejects_invalid_translation_semantic_review_switch(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            config_path = pathlib.Path(temporary) / "ocr_config.json"
-            config_path.write_text(
-                '{"translation_verify": "sometimes"}', encoding="utf-8"
             )
             with self.assertRaisesRegex(ValueError, "translation_verify"):
                 ocr_json_pipeline.load_config_defaults(config_path)

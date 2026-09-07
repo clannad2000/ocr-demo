@@ -36,7 +36,7 @@
 
 ## 验证要求
 
-- 代码改动至少运行`python3 -m py_compile ocr_demo.py`和`python3 -m unittest discover -s tests`。
+- 代码改动至少运行`python -m py_compile ocr_json_pipeline.py codex_page_review.py codex_book_review.py codex_book_finalize.py erase_english_from_deepseek.py pdf_backfill.py pdf_translation_writer.py`和`python -m unittest discover -s tests`。
 - 配置改动需解析`ocr_config.example.json`；不得打印实际`ocr_config.json`密钥。
 - 裁决改动需验证候选并集、决定计数、坐标唯一性、输入哈希和原记录不变。
 - 必须区分语法/mock/本地验证与真实外部API端到端验证。
