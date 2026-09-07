@@ -14,7 +14,10 @@ python erase_english_from_deepseek.py `
     --json runs/chapter1-exact-02/pages/page-0030.json `
     --output-dir runs/chapter1-exact-02/erase
 
-python erase_english_from_deepseek.py `    --image runs/chapter1-exact-02/pages/page-0030.png `    --json runs/chapter1-exact-02/pages/page-0030.json `    --output-dir runs/chapter1-exact-02/erase1 --dilate-iterations 15
+Batch example (all same-stem PNG/JSON pairs in one directory):
+python erase_english_from_deepseek.py `
+    --pages-dir runs/chapter1-exact-02/pages `
+    --output-dir runs/chapter1-exact-02/erase
 
 Generated files:
     <image-stem>.cleaned.png
@@ -60,8 +63,16 @@ def parse_args() -> argparse.Namespace:
             "layout.content. No supplemental OCR is performed."
         )
     )
-    parser.add_argument("--image", required=True, help="Source PNG/JPG image")
-    parser.add_argument("--json", required=True, help="Existing OCR result JSON")
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument("--image", help="Source PNG/JPG image")
+    input_group.add_argument(
+        "--pages-dir",
+        help="Directory containing same-stem page PNG and OCR JSON pairs",
+    )
+    parser.add_argument(
+        "--json",
+        help="Existing OCR result JSON (required with --image; invalid with --pages-dir)",
+    )
     parser.add_argument(
         "--output-dir",
         default="output",
@@ -114,7 +125,12 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Also erase a numeric page number at the bottom center",
     )
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.image and not args.json:
+        parser.error("--json is required with --image")
+    if args.pages_dir and args.json:
+        parser.error("--json cannot be used with --pages-dir")
+    return args
 
 
 def read_json(path: Path) -> Dict[str, Any]:
@@ -623,9 +639,56 @@ def make_adjusted_json(
     return adjusted
 
 
-def process(args: argparse.Namespace) -> Dict[str, Path]:
-    image_path = Path(args.image).expanduser().resolve()
-    json_path = Path(args.json).expanduser().resolve()
+def discover_page_pairs(pages_dir: Path) -> List[Tuple[Path, Path]]:
+    """Return all deterministically ordered same-stem PNG/JSON page pairs."""
+    resolved_dir = pages_dir.expanduser().resolve()
+    if not resolved_dir.is_dir():
+        raise ProcessingError(f"Pages directory does not exist: {resolved_dir}")
+
+    image_paths = sorted(
+        (
+            path
+            for path in resolved_dir.iterdir()
+            if path.is_file() and path.suffix.lower() == ".png"
+        ),
+        key=lambda path: path.name.casefold(),
+    )
+    if not image_paths:
+        raise ProcessingError(f"No PNG page images found in: {resolved_dir}")
+
+    pairs: List[Tuple[Path, Path]] = []
+    missing_json: List[str] = []
+    for image_path in image_paths:
+        json_path = image_path.with_suffix(".json")
+        if not json_path.is_file():
+            missing_json.append(json_path.name)
+            continue
+        pairs.append((image_path, json_path))
+
+    if missing_json:
+        raise ProcessingError(
+            "Missing same-stem OCR JSON for PNG page image(s): "
+            + ", ".join(missing_json)
+        )
+    return pairs
+
+
+def process(
+    args: argparse.Namespace,
+    *,
+    image_path: Optional[Path] = None,
+    json_path: Optional[Path] = None,
+) -> Dict[str, Path]:
+    image_path = (
+        image_path.expanduser().resolve()
+        if image_path is not None
+        else Path(args.image).expanduser().resolve()
+    )
+    json_path = (
+        json_path.expanduser().resolve()
+        if json_path is not None
+        else Path(args.json).expanduser().resolve()
+    )
     output_dir = Path(args.output_dir).expanduser().resolve()
 
     if not image_path.is_file():
@@ -755,10 +818,22 @@ def process(args: argparse.Namespace) -> Dict[str, Path]:
     return output_paths
 
 
+def process_pages(args: argparse.Namespace) -> List[Tuple[Path, Dict[str, Path]]]:
+    """Process every validated page pair selected by --pages-dir."""
+    pairs = discover_page_pairs(Path(args.pages_dir))
+    return [
+        (image_path, process(args, image_path=image_path, json_path=json_path))
+        for image_path, json_path in pairs
+    ]
+
+
 def main() -> int:
     args = parse_args()
     try:
-        output_paths = process(args)
+        if args.pages_dir:
+            batch_output_paths = process_pages(args)
+        else:
+            batch_output_paths = [(Path(args.image), process(args))]
     except ProcessingError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
@@ -766,9 +841,14 @@ def main() -> int:
         print(f"unexpected error: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
 
-    print("Processing completed. Supplemental OCR: disabled")
-    for name, path in output_paths.items():
-        print(f"{name}: {path}")
+    print(
+        "Processing completed. "
+        f"Pages processed: {len(batch_output_paths)}. Supplemental OCR: disabled"
+    )
+    for image_path, output_paths in batch_output_paths:
+        print(f"source_image: {image_path}")
+        for name, path in output_paths.items():
+            print(f"{name}: {path}")
     return 0
 
 

@@ -2,9 +2,9 @@ __pycache__/
 *.pyc
 runs/
 node_modules/
-ocr_config.json
 .env
 .secrets/
 *.log
 *.pdf
 tmp/
+ocr_config - 副本.json
