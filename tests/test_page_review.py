@@ -8,16 +8,16 @@ import tempfile
 import unittest
 from unittest import mock
 
-import codex_page_review as review
+from pipeline import page_review as review
 
 
 class CodexPageReviewTests(unittest.TestCase):
     def make_fixture(self, root: pathlib.Path) -> tuple[pathlib.Path, pathlib.Path]:
-        config = root / "ocr_config.json"
+        config = root / "pipeline.json"
         config.write_text(
             """{
               // Local ChatGPT-authenticated Codex settings.
-              "codex_page_review": {
+              "codex_review": {
                 "command": "codex",
                 "model": "gpt-5.6-terra",
                 "reasoning_effort": "high",
@@ -232,8 +232,8 @@ class CodexPageReviewTests(unittest.TestCase):
                     os.environ,
                     {"OPENAI_API_KEY": "must-not-leak", "CODEX_API_KEY": "must-not-leak"},
                 ),
-                mock.patch("codex_page_review.shutil.which", return_value="codex.exe"),
-                mock.patch("codex_page_review.subprocess.run", side_effect=fake_run),
+                mock.patch("pipeline.page_review.shutil.which", return_value="codex.exe"),
+                mock.patch("pipeline.page_review.subprocess.run", side_effect=fake_run),
             ):
                 response, elapsed, login_status, usage = review.invoke_codex(
                     settings, inputs
@@ -265,8 +265,8 @@ class CodexPageReviewTests(unittest.TestCase):
             executable.parent.mkdir(parents=True)
             executable.write_bytes(b"stub")
             with (
-                mock.patch("codex_page_review.shutil.which", return_value=None),
-                mock.patch("codex_page_review.os.name", "nt"),
+                mock.patch("pipeline.page_review.shutil.which", return_value=None),
+                mock.patch("pipeline.page_review.os.name", "nt"),
                 mock.patch.dict(
                     os.environ,
                     {"LOCALAPPDATA": str(local_app_data)},
@@ -294,7 +294,7 @@ class CodexPageReviewTests(unittest.TestCase):
             stdout = io.StringIO()
             with (
                 mock.patch(
-                    "codex_page_review.invoke_codex",
+                    "pipeline.page_review.invoke_codex",
                     side_effect=AssertionError("must not invoke Codex"),
                 ),
                 contextlib.redirect_stdout(stdout),
@@ -328,7 +328,7 @@ class CodexPageReviewTests(unittest.TestCase):
             stdout = io.StringIO()
             with (
                 mock.patch(
-                    "codex_page_review.invoke_codex",
+                    "pipeline.page_review.invoke_codex",
                     return_value=(
                         self.valid_response(),
                         1.25,
@@ -440,7 +440,7 @@ class CodexPageReviewTests(unittest.TestCase):
                 return image_response, 2.0, "Logged in using ChatGPT", usage_two
 
             with mock.patch(
-                "codex_page_review.invoke_codex", side_effect=fake_invoke
+                "pipeline.page_review.invoke_codex", side_effect=fake_invoke
             ):
                 validated, elapsed, _login, usage, stages, used_inputs = (
                     review.run_review_stages(settings, inputs)

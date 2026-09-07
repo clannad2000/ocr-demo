@@ -36,8 +36,8 @@
 
 ## 验证要求
 
-- 代码改动至少运行`python -m py_compile ocr_json_pipeline.py codex_page_review.py codex_book_review.py codex_book_finalize.py erase_english_from_deepseek.py pdf_backfill.py pdf_translation_writer.py`和`python -m unittest discover -s tests`。
-- 配置改动需解析`ocr_config.example.json`；不得打印实际`ocr_config.json`密钥。
+- 代码改动至少运行`python -m py_compile pipeline/__main__.py pipeline/config.py pipeline/paths.py pipeline/ocr.py pipeline/page_review.py pipeline/codex_review.py pipeline/finalize.py pipeline/erase.py pipeline/pdf_backfill.py pipeline/pdf_writer.py`和`python -m unittest discover -s tests`。
+- 配置改动需解析`config/pipeline.example.json`；不得打印`config/.env`密钥或OAuth凭据。
 - 裁决改动需验证候选并集、决定计数、坐标唯一性、输入哈希和原记录不变。
 - 必须区分语法/mock/本地验证与真实外部API端到端验证。
 - PDF程序检查通过只能标记`program_checked`，不得表述为视觉验收通过；最终视觉接受由用户确认。

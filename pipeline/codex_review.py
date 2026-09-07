@@ -26,7 +26,8 @@ import threading
 import time
 from typing import Any, Iterable
 
-import codex_page_review as page_review
+from . import page_review
+from .paths import PROJECT_ROOT
 
 
 SCHEMA_VERSION = 1
@@ -89,9 +90,8 @@ def load_settings(config_path: pathlib.Path) -> tuple[BookSettings, dict[str, An
     data = read_json(config_path, jsonc=True)
     if not isinstance(data, dict):
         raise BookReviewError("Config root must be an object")
-    inherited = data.get("codex_page_review", {})
-    raw = data.get("codex_book_review", {})
-    if not isinstance(inherited, dict) or not isinstance(raw, dict):
+    raw = data.get("codex_review", {})
+    if not isinstance(raw, dict):
         raise BookReviewError("Codex review configuration must be an object")
     allowed = {
         "command",
@@ -107,10 +107,9 @@ def load_settings(config_path: pathlib.Path) -> tuple[BookSettings, dict[str, An
     unknown = sorted(set(raw) - allowed)
     if unknown:
         raise BookReviewError(
-            "Unknown codex_book_review fields: " + ", ".join(unknown)
+            "Unknown codex_review fields: " + ", ".join(unknown)
         )
-    merged = {key: value for key, value in inherited.items() if key in allowed}
-    merged.update(raw)
+    merged = dict(raw)
     settings = BookSettings(
         command=str(merged.get("command", "codex")).strip(),
         model=str(merged.get("model", page_review.DEFAULT_MODEL)).strip(),
@@ -129,13 +128,13 @@ def load_settings(config_path: pathlib.Path) -> tuple[BookSettings, dict[str, An
     if not settings.command or not settings.model:
         raise BookReviewError("Codex command and model must not be empty")
     if settings.reasoning_effort not in page_review.ALLOWED_REASONING_EFFORTS:
-        raise BookReviewError("Invalid codex_book_review.reasoning_effort")
+        raise BookReviewError("Invalid codex_review.reasoning_effort")
     if settings.timeout_seconds < 1:
-        raise BookReviewError("codex_book_review.timeout_seconds must be positive")
+        raise BookReviewError("codex_review.timeout_seconds must be positive")
     if settings.image_mode not in page_review.ALLOWED_IMAGE_MODES:
-        raise BookReviewError("Invalid codex_book_review.image_mode")
+        raise BookReviewError("Invalid codex_review.image_mode")
     if settings.toc_image_detail not in {"auto", "low", "high", "original"}:
-        raise BookReviewError("Invalid codex_book_review.toc_image_detail")
+        raise BookReviewError("Invalid codex_review.toc_image_detail")
     if not isinstance(settings.require_chatgpt_login, bool):
         raise BookReviewError("require_chatgpt_login must be boolean")
     if not isinstance(settings.exclude_back_matter, bool):
@@ -154,7 +153,7 @@ def resolve_config_path(
         return None
     path = pathlib.Path(value).expanduser()
     if not path.is_absolute():
-        path = config_path.parent / path
+        path = PROJECT_ROOT / path
     return path.resolve()
 
 
@@ -1185,7 +1184,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config",
         type=pathlib.Path,
-        default=pathlib.Path(__file__).resolve().with_name("ocr_config.json"),
+        default=pathlib.Path(__file__).resolve().parent.parent / "config" / "pipeline.json",
     )
     parser.add_argument("--pdf", type=pathlib.Path)
     parser.add_argument("--toc-pages", help="PDF page range, for example 5-6")

@@ -3,8 +3,8 @@ import pathlib
 import tempfile
 import unittest
 
-import codex_book_review as book
-import codex_page_review as page
+from pipeline import codex_review as book
+from pipeline import page_review as page
 
 
 class CodexBookReviewTests(unittest.TestCase):
@@ -13,17 +13,15 @@ class CodexBookReviewTests(unittest.TestCase):
         with self.assertRaisesRegex(book.BookReviewError, "Invalid page range"):
             book.parse_page_spec("6-5")
 
-    def test_settings_inherit_page_review_model(self) -> None:
+    def test_shared_codex_review_settings(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            config = pathlib.Path(temporary) / "ocr_config.json"
+            config = pathlib.Path(temporary) / "pipeline.json"
             config.write_text(
                 """{
-                  "codex_page_review": {
+                  "codex_review": {
                     "model": "gpt-5.6-terra",
                     "reasoning_effort": "high",
-                    "image_mode": "on_demand"
-                  },
-                  "codex_book_review": {
+                    "image_mode": "on_demand",
                     "exclude_back_matter": true,
                     "toc_image_detail": "high"
                   }

@@ -8,16 +8,8 @@ supplement. Only regions present in ``layout.content`` are processed.
 Dependencies:
     pip install numpy opencv-python-headless
 
-Example:
-python erase_english_from_deepseek.py `
-    --image runs/chapter1-exact-02/pages/page-0030.png `
-    --json runs/chapter1-exact-02/pages/page-0030.json `
-    --output-dir runs/chapter1-exact-02/erase
-
-Batch example (all same-stem PNG/JSON pairs in one directory):
-python erase_english_from_deepseek.py `
-    --pages-dir runs/chapter1-exact-02/pages `
-    --output-dir runs/chapter1-exact-02/erase
+The public entry point is ``python -m pipeline erase``. It derives the page
+and output directories for every configured PDF automatically.
 
 Generated files:
     <image-stem>.cleaned.png
@@ -56,7 +48,7 @@ class ProcessingError(RuntimeError):
     """Raised when the input cannot be processed safely."""
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: List[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Erase text using only DeepSeek-OCR regions already contained in "
@@ -125,7 +117,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="Also erase a numeric page number at the bottom center",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if args.image and not args.json:
         parser.error("--json is required with --image")
     if args.pages_dir and args.json:
@@ -827,8 +819,8 @@ def process_pages(args: argparse.Namespace) -> List[Tuple[Path, Dict[str, Path]]
     ]
 
 
-def main() -> int:
-    args = parse_args()
+def main(argv: List[str] | None = None) -> int:
+    args = parse_args(argv)
     try:
         if args.pages_dir:
             batch_output_paths = process_pages(args)

@@ -16,9 +16,9 @@ import pathlib
 import sys
 from typing import Any
 
-import codex_book_review as book_review
-import codex_page_review as page_review
-from pdf_backfill import (
+from . import codex_review as book_review
+from . import page_review
+from .pdf_backfill import (
     build_backfill_plan,
     build_final_translation_snapshot,
     load_human_translation_overrides,
@@ -259,7 +259,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config",
         type=pathlib.Path,
-        default=pathlib.Path(__file__).resolve().with_name("ocr_config.json"),
+        default=pathlib.Path(__file__).resolve().parent.parent / "config" / "pipeline.json",
     )
     parser.add_argument("--pdf", type=pathlib.Path)
     parser.add_argument("--pages-dir", type=pathlib.Path)
@@ -282,11 +282,14 @@ def main(argv: list[str] | None = None) -> int:
         config = book_review.read_json(config_path, jsonc=True)
         if not isinstance(config, dict):
             raise FinalizeError("Config root must be an object")
-        base_output = book_review.resolve_config_path(
+        configured_output = book_review.resolve_config_path(
             config.get("output"), config_path=config_path
         )
+        base_output = configured_output or (
+            args.output.expanduser().resolve().parent if args.output else None
+        )
         if base_output is None:
-            raise FinalizeError("Config output directory is required")
+            raise FinalizeError("--output is required when config has no output directory")
         source_pdf = (
             args.pdf.expanduser().resolve()
             if args.pdf

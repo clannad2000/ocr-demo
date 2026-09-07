@@ -3,8 +3,8 @@ import pathlib
 import tempfile
 import unittest
 
-import codex_book_finalize as finalize
-import codex_page_review as page_review
+from pipeline import finalize
+from pipeline import page_review
 
 
 class CodexBookFinalizeTests(unittest.TestCase):

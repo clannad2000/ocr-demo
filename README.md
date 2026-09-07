@@ -1,139 +1,195 @@
 # Beast Academy OCR 与中文 PDF 流程
 
-项目只保留以下生产链：
+项目使用统一入口完成五个阶段：
 
 ```text
-OCR + OCR复核 + DeepL翻译
+OCR、OCR复核、DeepL翻译
   -> Codex整书翻译复核
-  -> 最终裁决快照与坐标计划
+  -> 最终裁决和锁定快照
   -> 擦除英文
   -> 写入中文PDF
 ```
 
-页面JSON、`manifest.json`和`study.html`是不可变证据；Codex复核与后处理只生成
-独立产物。
+## 目录
+
+```text
+ocr-demo/
+├── pipeline/                 # Python包和五阶段实现
+├── tools/                    # DeepL MCP辅助程序
+├── config/
+│   ├── pipeline.example.json
+│   ├── pipeline.json         # 本地运行配置，不提交
+│   ├── .env.example
+│   ├── .env                  # 密钥与OAuth凭据，不提交
+│   └── overrides/            # 可选的每书人工覆盖文件
+├── docs/
+├── tests/
+├── book/                     # 输入PDF
+└── runs/book/                # 自动生成的分类产物
+```
 
 ## 环境
 
 - Python 3.11或更高版本；
 - Poppler的`pdftoppm`和`pdfinfo`；
-- Node.js 18或更高版本及`npm install`安装的DeepL MCP依赖；
-- `requirements.txt`中的PDF与图像处理依赖；
+- Node.js 18或更高版本；
 - 已使用ChatGPT帐号登录的Codex CLI。
 
-项目优先使用已有`.conda`环境。API密钥和DeepL OAuth凭据只存放于被忽略的
-`.env`，不要写进`ocr_config.json`。
-
-## 1. OCR、OCR复核和DeepL翻译
+项目优先使用`.conda`环境：
 
 ```powershell
-.\.conda\python.exe .\ocr_json_pipeline.py `
-  --pdf ".\book\beast academy math guide 3A.pdf" `
-  --pages "1-100" `
-  --output ".\runs\study-batch-3A" `
-  --mode study `
-  --workers 2 `
-  --verify auto
+.\.conda\python.exe -m pip install -r .\requirements.txt
+npm install
+codex login status
 ```
 
-主要产物位于`runs\study-batch-3A\pages`：每页一张PNG和一个
-`page-NNNN.json`。`--verify auto`只对风险页调用独立图像OCR复核；主OCR仍是
-英文权威来源，复核结果不会自动覆盖主OCR。学习区域随后由DeepL逐区域翻译。
-
-首次运行前执行`npm install`。DeepL首次调用会完成OAuth登录，并在`.env`中维护
-`DEEPL_OAUTH_CREDENTIALS`。
-
-## 2. Codex整书翻译复核
-
-先用`plan`命令根据目录页生成`book-review-plan.json`；已有计划时可直接执行
-`review`：
+复制配置模板，并只在`config/.env`填写密钥：
 
 ```powershell
-.\.conda\python.exe .\codex_book_review.py review `
-  --config .\ocr_config.json `
-  --pdf ".\book\beast academy math guide 3A.pdf" `
-  --pages-dir .\runs\study-batch-3A\pages `
-  --output .\runs\book-review-3A
+Copy-Item .\config\pipeline.example.json .\config\pipeline.json
+Copy-Item .\config\.env.example .\config\.env
 ```
 
-真实Codex调用由用户运行。建议先加`--dry-run`检查PDF、计划、页面输入和缺失项。
-每个章节使用可恢复的持久任务，结果写到
-`runs\book-review-3A\chapters\<task-id>`，不会修改页面JSON。
+## 输入和自动路径
 
-## 3. 生成最终裁决文件
+单本书：
+
+```jsonc
+"pdf": "./book/beast academy math guide 3A.pdf"
+```
+
+目录批处理：
+
+```jsonc
+"pdf": "./book/"
+```
+
+相对路径以项目根目录为基准。目录模式按文件名排序处理直属的全部`.pdf`，不递归
+子目录。PDF文件名去扩展名后，空白和不适合作为目录名的字符转换为下划线。
+
+例如`beast academy math guide 3A.pdf`自动使用：
+
+```text
+runs/book/beast_academy_math_guide_3A/
+├── 01-ocr/
+│   ├── info.log
+│   ├── manifest.json
+│   ├── summary.md
+│   ├── study.html
+│   └── pages/
+├── 02-codex-review/
+│   ├── book-review-plan.json
+│   ├── book-review-checkpoint.json
+│   ├── book-codex-review-summary.json
+│   └── chapters/
+├── 03-final/
+│   ├── book-codex-adjudication.json
+│   ├── chapter_translation_final.json
+│   └── pdf_backfill_plan.json
+├── 04-erased/
+│   ├── page-NNNN.cleaned.png
+│   ├── page-NNNN.mask.png
+│   ├── page-NNNN.debug.png
+│   └── page-NNNN.adjusted.json
+└── 05-pdf/
+    ├── beast_academy_math_guide_3A-zh-review.pdf
+    └── pdf_translation_writer_report.json
+```
+
+这些路径不写入配置，也不需要在命令行手动指定。
+
+## 五步命令
+
+默认读取`config/pipeline.json`：
 
 ```powershell
-.\.conda\python.exe .\codex_book_finalize.py `
-  --config .\ocr_config.json `
-  --book-review-dir .\runs\book-review-3A
+.\.conda\python.exe -m pipeline ocr
+.\.conda\python.exe -m pipeline review
+.\.conda\python.exe -m pipeline finalize
+.\.conda\python.exe -m pipeline erase
+.\.conda\python.exe -m pipeline write
 ```
 
-建议先加`--dry-run`。脚本校验输入SHA-256、全部`page + region id`、裁决和未解决
-人工项，然后生成：
-
-- `book-codex-adjudication.json`；
-- `chapter_translation_final.json`；
-- `pdf_backfill_plan.json`。
-
-`chapter_translation_final.json`是回写阶段唯一可读取的最终译文快照。
-
-## 4. 擦除英文
-
-批量处理目录：
+指定其他配置时，`--config`放在阶段名称之前：
 
 ```powershell
-.\.conda\python.exe .\erase_english_from_deepseek.py `
-  --pages-dir .\runs\study-batch-3A\pages `
-  --output-dir .\runs\study-batch-3A\erase `
-  --dilate-iterations 2
+.\.conda\python.exe -m pipeline --config .\config\pipeline.local.json ocr
 ```
 
-单页调试：
+### 1. OCR
+
+`ocr`渲染配置页码，并行执行DeepSeek版面定位和Qwen主OCR。`verify: auto`只对
+确定性风险页调用独立图像OCR复核。主OCR仍是英文权威来源，复核不会自动覆盖它。
+学习区域随后由DeepL逐区域翻译。
+
+本地预检查：
 
 ```powershell
-.\.conda\python.exe .\erase_english_from_deepseek.py `
-  --image .\runs\study-batch-3A\pages\page-0030.png `
-  --json .\runs\study-batch-3A\pages\page-0030.json `
-  --output-dir .\runs\study-batch-3A\erase `
-  --dilate-iterations 2
+.\.conda\python.exe -m pipeline ocr --dry-run
 ```
 
-目录模式按文件名处理同名PNG/JSON页面对，生成`page-NNNN.cleaned.png`。
+### 2. Codex复核
 
-## 5. 回写中文PDF
+`review`在`02-codex-review`不存在计划时，先使用配置中的`toc_pages`生成计划，再按
+章节持久任务复核`01-ocr/pages`。已有计划时直接恢复或继续复核。
 
 ```powershell
-.\.conda\python.exe .\pdf_translation_writer.py `
-  --config .\ocr_config.json `
-  --cleaned-pages-dir .\runs\study-batch-3A\erase
+.\.conda\python.exe -m pipeline review --dry-run
 ```
 
-建议先加`--dry-run`检查锁定快照、坐标计划、字体和cleaned PNG是否齐全。
-写入器不执行擦除、不重新判断译文，也不修改快照。程序检查通过只能标记
-`program_checked`；最终视觉接受由用户确认。
+真实Codex调用由用户去掉`--dry-run`后运行。
 
-## 配置
+### 3. 定稿
 
-`ocr_config.example.json`保留五步流程需要的内容：
+`finalize`验证源PDF、页面JSON、计划、裁决、全部`page + region id`和输入SHA-256，
+再把产物写入`03-final`。
 
-- OCR、OCR复核、DeepL和模型用途映射；
-- `codex_page_review`与`codex_book_review`；
-- `pdf_backfill`与`pdf_translation_writer`。
+```powershell
+.\.conda\python.exe -m pipeline finalize --dry-run
+```
 
-配置支持JSONC注释。复制模板后只修改路径、模型资料和用途映射；密钥仍放`.env`。
+### 4. 擦除英文
+
+`erase`自动读取`01-ocr/pages`的全部同名PNG/JSON页面对并写入`04-erased`：
+
+```powershell
+.\.conda\python.exe -m pipeline erase --dilate-iterations 2
+```
+
+擦除器不写中文，也不修改页面JSON。
+
+### 5. 写入中文PDF
+
+`write`自动读取`03-final`的锁定快照和坐标计划，以及`04-erased`的cleaned PNG：
+
+```powershell
+.\.conda\python.exe -m pipeline write --dry-run
+```
+
+确认后去掉`--dry-run`。程序检查通过只能标记`program_checked`，最终视觉接受由用户
+确认。
+
+## 人工覆盖
+
+若存在以下文件，统一入口会自动加载：
+
+```text
+config/overrides/<书名>.translations.json
+config/overrides/<书名>.layout.json
+```
+
+译文覆盖只在定稿阶段读取；布局覆盖只在PDF写入阶段读取。两者均不修改页面JSON或
+Codex原裁决。
 
 ## 本地验证
 
 ```powershell
 .\.conda\python.exe -m py_compile `
-  .\ocr_json_pipeline.py `
-  .\codex_page_review.py `
-  .\codex_book_review.py `
-  .\codex_book_finalize.py `
-  .\erase_english_from_deepseek.py `
-  .\pdf_backfill.py `
-  .\pdf_translation_writer.py
+  .\pipeline\__main__.py .\pipeline\config.py .\pipeline\paths.py `
+  .\pipeline\ocr.py .\pipeline\page_review.py .\pipeline\codex_review.py `
+  .\pipeline\finalize.py .\pipeline\erase.py `
+  .\pipeline\pdf_backfill.py .\pipeline\pdf_writer.py
 .\.conda\python.exe -m unittest discover -s tests
 ```
 
-本地语法、单元测试和`--dry-run`不等于真实外部API端到端验证。
+语法、单元测试和`--dry-run`属于本地验证，不等于真实外部API端到端验证。

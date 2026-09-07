@@ -1,25 +1,16 @@
 {
-  // 五步流程共用的源PDF和OCR批次目录。
+  // 相对路径始终以项目根目录为基准。可填写单个PDF或包含PDF的目录（不递归）。
   "pdf": "./book/beast academy math guide 3A.pdf",
   "pages": "1-100",
-  "output": "./runs/study-batch-3A",
-  "log_file": "./runs/study-batch-3A/info.log",
-  "mode": "study",
+  // 首次自动生成整书复核计划时使用的目录页。
+  "toc_pages": "5-6",
   "long_edge": 2048,
   "workers": 2,
   "verify": "auto",
   "resume": false,
 
-  "codex_page_review": {
+  "codex_review": {
     "command": "codex",
-    "model": "gpt-5.6-terra",
-    "reasoning_effort": "high",
-    "timeout_seconds": 1800,
-    "image_mode": "on_demand",
-    "require_chatgpt_login": true
-  },
-  "codex_book_review": {
-    // 未填写的Codex设置继承codex_page_review。
     "model": "gpt-5.6-terra",
     "reasoning_effort": "high",
     "timeout_seconds": 1800,
@@ -30,17 +21,7 @@
     "require_chatgpt_login": true
   },
 
-  // 定稿器生成锁定快照和坐标计划；不执行旧PDF导出。
-  "pdf_backfill": {
-    "final_translation_filename": "chapter_translation_final.json",
-    "plan_filename": "pdf_backfill_plan.json",
-    "human_translation_overrides_filename": ""
-  },
-  // 纯写入器只消费cleaned PNG、锁定快照和坐标计划。
-  "pdf_translation_writer": {
-    "cleaned_pages_dir": "./runs/study-batch-3A/erase",
-    "output_filename": "beast-academy-3A-zh-review.pdf",
-    "report_filename": "pdf_translation_writer_report.json",
+  "pdf_writer": {
     "font_file": "C:/Windows/Fonts/simhei.ttf",
     "rules": {
       "minimum_font_size": 7.0,
@@ -51,7 +32,6 @@
     }
   },
 
-  // 密钥名称只引用.env，不在配置文件中存值。
   "model_profiles": {
     "deepseek-ocr": {
       "provider": "siliconflow",
@@ -104,6 +84,6 @@
     "oauth_keychain_service": "Beast Academy OCR DeepL MCP",
     "oauth_keychain_account": "https://mcp.deepl.com/v1/mcp",
     "node_command": "node",
-    "bridge_script": "./deepl_mcp_client.mjs"
+    "bridge_script": "../tools/deepl_mcp_client.mjs"
   }
 }

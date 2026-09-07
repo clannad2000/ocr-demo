@@ -783,7 +783,7 @@ def _build_inpaint_overlay(
         import cv2  # type: ignore
         import numpy as np  # type: ignore
 
-        from erase_english_from_deepseek import erase_image_boxes
+        from .erase import erase_image_boxes
     except ImportError as error:
         raise RuntimeError(
             "OpenCV text erasure requires numpy and opencv-python-headless; "

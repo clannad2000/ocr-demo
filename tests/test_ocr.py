@@ -5,24 +5,24 @@ import types
 import unittest
 from unittest import mock
 
-import ocr_json_pipeline
+from pipeline import ocr
 
 
-class OcrJsonPipelineTests(unittest.TestCase):
+class OcrPipelineTests(unittest.TestCase):
     def test_removed_legacy_modes_are_not_public_cli_options(self):
-        parser = ocr_json_pipeline.build_parser()
+        parser = ocr.build_parser()
         args = parser.parse_args([])
         self.assertEqual(args.translation_verify, "never")
         self.assertNotIn("--chapter-review", parser._option_string_actions)
 
     def test_config_rejects_removed_translation_semantic_review_switch(self):
         with tempfile.TemporaryDirectory() as temporary:
-            config_path = pathlib.Path(temporary) / "ocr_config.json"
+            config_path = pathlib.Path(temporary) / "pipeline.json"
             config_path.write_text(
                 '{"translation_verify": "always"}', encoding="utf-8"
             )
             with self.assertRaisesRegex(ValueError, "translation_verify"):
-                ocr_json_pipeline.load_config_defaults(config_path)
+                ocr.load_config_defaults(config_path)
 
     def test_page_writer_creates_json_without_markdown(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -30,7 +30,7 @@ class OcrJsonPipelineTests(unittest.TestCase):
             json_path = pages / "page-0053.json"
             record = {"page": 53, "mode": "study"}
 
-            ocr_json_pipeline.write_page_json(json_path, record)
+            ocr.write_page_json(json_path, record)
 
             self.assertEqual(
                 json.loads(json_path.read_text(encoding="utf-8")), record
@@ -43,8 +43,8 @@ class OcrJsonPipelineTests(unittest.TestCase):
             summary_md = output / "summary.md"
             study_html = output / "study.html"
 
-            ocr_json_pipeline.atomic_write_text(summary_md, "summary")
-            ocr_json_pipeline.atomic_write_text(study_html, "study")
+            ocr.atomic_write_text(summary_md, "summary")
+            ocr.atomic_write_text(study_html, "study")
 
             self.assertEqual(summary_md.read_text(encoding="utf-8"), "summary")
             self.assertEqual(study_html.read_text(encoding="utf-8"), "study")
@@ -62,7 +62,7 @@ class OcrJsonPipelineTests(unittest.TestCase):
                 output=output, resume=True, redo_pages=set()
             )
 
-            result = ocr_json_pipeline.process_page(args, 53)
+            result = ocr.process_page(args, 53)
 
             self.assertEqual(result, record)
 
@@ -82,10 +82,10 @@ class OcrJsonPipelineTests(unittest.TestCase):
             )
 
             with mock.patch.object(
-                ocr_json_pipeline, "render_page", side_effect=RuntimeError("rerun")
+                ocr, "render_page", side_effect=RuntimeError("rerun")
             ) as render:
                 with self.assertRaisesRegex(RuntimeError, "rerun"):
-                    ocr_json_pipeline.process_page(args, 53)
+                    ocr.process_page(args, 53)
 
             render.assert_called_once()
 

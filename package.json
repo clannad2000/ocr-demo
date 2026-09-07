@@ -1,8 +1,8 @@
 {
-  "name": "beast-academy-ocr-demo",
+  "name": "beast-academy-book-pipeline",
   "version": "0.1.0",
   "private": true,
-  "description": "Local DeepL MCP OAuth bridge for the OCR study-page pipeline",
+  "description": "Five-stage OCR, review, erasure, and Chinese PDF pipeline",
   "type": "module",
   "engines": {
     "node": ">=18"

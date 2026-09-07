@@ -1,79 +1,100 @@
 # 系统设计
 
-## 范围
+## 入口与模块
 
-系统只保留五段生产流程：
+唯一公开入口是`python -m pipeline <stage>`。`pipeline/__main__.py`读取共享配置，
+发现一个或多个PDF，为每本书生成`BookPaths`，再调用对应阶段：
 
-1. `ocr_json_pipeline.py`完成页面渲染、版面OCR、主OCR、可选OCR复核和DeepL翻译；
-2. `codex_book_review.py`按目录拆分整书并执行跨页翻译复核；
-3. `codex_book_finalize.py`聚合裁决，生成锁定译文快照和坐标计划；
-4. `erase_english_from_deepseek.py`按页或按目录生成已擦除英文的PNG；
-5. `pdf_translation_writer.py`把锁定译文写入cleaned PNG并组装完整PDF。
+| 阶段 | 模块 | 职责 |
+|---|---|---|
+| `ocr` | `pipeline.ocr` | 渲染、版面OCR、主OCR、OCR复核、DeepL翻译 |
+| `review` | `pipeline.codex_review` | 目录计划与分章持久Codex复核 |
+| `finalize` | `pipeline.finalize` | 裁决聚合、锁定译文、坐标计划 |
+| `erase` | `pipeline.erase` | 字形掩码、OpenCV修复、cleaned PNG |
+| `write` | `pipeline.pdf_writer` | 中文排版、PDF组装、程序检查 |
+
+`pipeline.page_review`和`pipeline.pdf_backfill`是内部共用模块，不作为独立生产入口。
+`pipeline.config`负责JSONC读取，`pipeline.paths`是所有派生路径的唯一来源。
+
+## PDF发现与路径不变式
+
+配置`pdf`可以是单个PDF或目录。相对路径以项目根目录为基准；目录只扫描直属PDF，
+按文件名排序，不递归。每本PDF的文件名生成唯一书名slug。
+
+所有运行产物固定归入：
+
+```text
+runs/book/<slug>/
+  01-ocr/
+  02-codex-review/
+  03-final/
+  04-erased/
+  05-pdf/
+```
+
+阶段模块不自行拼接业务目录；统一入口显式把`BookPaths`中的绝对路径传给模块。
+若同批PDF规范化后得到重复slug，必须在写入前停止。
 
 ## 数据流
 
 ```text
 源PDF
-  -> Poppler页面PNG
-  -> DeepSeek版面坐标 + Qwen主OCR
-  -> 风险触发的独立OCR复核
-  -> DeepL逐区域翻译
-  -> page-NNNN.json + page-NNNN.png
-  -> Codex分章持久复核
-  -> page-NNNN-codex-review.json
-  -> 最终裁决聚合
-  -> chapter_translation_final.json + pdf_backfill_plan.json
+  -> 01-ocr: 页面PNG、页面JSON、manifest、summary、study.html
+  -> 02-codex-review: 计划、检查点、逐页独立裁决
+  -> 03-final: 聚合裁决、锁定译文、坐标计划
 
-page-NNNN.png + page-NNNN.json
-  -> 英文擦除
-  -> page-NNNN.cleaned.png
+01-ocr页面PNG/JSON
+  -> 04-erased: cleaned PNG、mask、debug、adjusted JSON
 
-源PDF + 锁定译文 + 坐标计划 + cleaned PNG
-  -> 中文写入器
-  -> 中文PDF + 程序检查报告
+源PDF + 03-final + 04-erased
+  -> 05-pdf: 中文PDF、程序检查报告
   -> 人工视觉验收
 ```
 
-## 责任边界
-
-- 主OCR是英文权威来源；坐标OCR和OCR复核只产生证据，不自动覆盖主OCR。
-- DeepL只翻译主OCR选出的学习区域，数字、公式和条件必须保持不变。
-- Codex复核读取原英文、当前译文、上下文、术语和必要图像后直接裁决，不使用多数票。
-- Codex结果不得写回页面JSON、`manifest.json`或`study.html`。
-- 定稿前必须验证PDF、页面JSON和复核输入SHA-256，以及全部`page + region id`。
-- 人工复核只处理Codex补充证据后仍不能决定的项目；清单可以为空。
-- PDF回写只能读取锁定的最终译文快照，不能自行改译文。
-- 擦除器负责mask与inpaint；中文写入器只消费cleaned PNG，不包含擦除实现。
-- 程序检查通过只表示`program_checked`，最终视觉接受由用户确认。
-
 ## 配置边界
 
-- API密钥与DeepL OAuth凭据只位于`.env`；
-- `model_profiles`定义平台、模型ID、端点和思考开关；
-- `model_usage`只把版面OCR、主OCR和OCR复核用途映射到模型资料；
-- Qwen思考开关使用`enable_thinking`，DeepSeek使用`thinking.type`；
-- `codex_page_review`和`codex_book_review`使用本机ChatGPT登录；
-- `pdf_backfill`只定义快照、坐标计划和人工覆盖位置；
-- `pdf_translation_writer`只定义cleaned PNG、输出、字体和排版规则。
+`config/pipeline.json`只保存不可自动推导的输入和行为：
 
-## 不可变输入与独立输出
+- PDF文件或目录、页码、目录页、并发和复核策略；
+- `model_profiles`与`model_usage`；
+- DeepL连接和翻译约束；
+- Codex模型、推理强度和图像策略；
+- PDF字体与布局规则。
 
-| 输入/产物 | 写入者 | 后续约束 |
-|---|---|---|
-| `page-NNNN.json` | OCR主链 | 后续流程只读 |
-| `page-NNNN.png` | OCR主链 | 擦除与必要图像复核只读 |
-| `book-review-plan.json` | 整书计划 | 定稿时校验 |
-| `page-NNNN-codex-review.json` | Codex复核 | 不写回页面JSON |
-| `book-codex-adjudication.json` | 定稿器 | 独立审计记录 |
-| `chapter_translation_final.json` | 定稿器 | PDF回写唯一译文源 |
-| `pdf_backfill_plan.json` | 定稿器 | 译文到坐标的确定性映射 |
-| `page-NNNN.cleaned.png` | 擦除器 | 写入器的页面底图 |
-| 中文PDF | 写入器 | 进入人工视觉验收 |
+配置不得保存书籍输出根目录、日志、页面目录、复核目录、擦除目录或输出文件名。
+API密钥与DeepL OAuth凭据只位于`config/.env`。
+
+模型资料和用途映射保持解耦。Qwen思考开关使用`enable_thinking`；DeepSeek协议转换
+仍由调用层负责。
+
+## 证据与裁决不变式
+
+- 主OCR是英文权威来源；坐标OCR和OCR复核只产生证据。
+- 页面JSON、`manifest.json`和`study.html`在Codex复核后保持不变。
+- Codex读取原英文、当前译文、同章上下文、术语和必要图片后直接裁决，不用多数票。
+- 定稿前验证PDF、页面JSON、计划、裁决输入SHA-256和全部`page + region id`。
+- 人工复核只处理Codex补充证据后仍无法判断的项目；清单可以为空。
+- `chapter_translation_final.json`是PDF写入器唯一可读取的译文来源。
+- 擦除与写入分离；写入器不包含mask、redaction或inpaint实现。
+- 程序检查只可标记`program_checked`；最终视觉接受必须由用户确认。
+
+## 独立覆盖文件
+
+人工译文与布局修正按slug自动发现：
+
+```text
+config/overrides/<slug>.translations.json
+config/overrides/<slug>.layout.json
+```
+
+人工覆盖不得写回OCR证据或Codex裁决。译文覆盖优先级高于Codex裁决；布局覆盖只能
+改变坐标、字号、颜色等排版属性，不能改变译文。
 
 ## 验证层级
 
-1. Python语法、单元测试和JSONC模板解析；
-2. 各脚本`--dry-run`的路径、哈希、区域集合与依赖检查；
-3. 用户运行真实OCR、DeepL和Codex调用；
-4. PDF结构、计数、字体、坐标唯一性、相交与非空检查；
-5. 用户完成最终视觉验收。
+1. 包内模块语法、单元测试和配置解析；
+2. 统一入口的PDF发现、slug及路径映射测试；
+3. 各阶段`--dry-run`的路径、哈希、区域集合和依赖检查；
+4. 用户运行真实OCR、DeepL与Codex；
+5. PDF程序全量检查；
+6. 用户完成最终视觉验收。

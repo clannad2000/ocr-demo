@@ -1,25 +1,15 @@
 flowchart TD
-  PDF["Source PDF - read only"] --> R["Poppler page rendering"]
-  R --> LO["Layout OCR - DeepSeek coordinates"]
-  R --> PO["Primary OCR - authoritative English"]
-  LO --> DR["Deterministic page risk checks"]
-  PO --> DR
-  DR --> OV["Optional image OCR verifier"]
-  PO --> SEL["Study-region selection"]
-  SEL --> TR["DeepL region translation"]
-  OV --> PAGE["Immutable page PNG and JSON"]
-  TR --> PAGE
-  PAGE --> BOOK["Codex chapter-persistent review"]
-  BOOK --> DEC["Independent review JSON"]
-  DEC --> FINALIZE["Hash-checked finalization"]
-  PAGE --> FINALIZE
-  FINALIZE --> SNAP["Locked final translation snapshot"]
-  FINALIZE --> MAP["Deterministic coordinate plan"]
-  PAGE --> ERASE["External English erasure"]
-  ERASE --> CLEAN["Cleaned page PNG"]
-  PDF --> WRITE["Chinese-only PDF writer"]
-  SNAP --> WRITE
-  MAP --> WRITE
-  CLEAN --> WRITE
+  CFG["config/pipeline.json"] --> DISC["Discover PDF files and derive slug"]
+  DISC --> P["runs/book/slug"]
+  PDF["Source PDF - read only"] --> OCR["01-ocr: layout OCR + primary OCR + verifier + DeepL"]
+  P --> OCR
+  OCR --> PAGE["Immutable page PNG and JSON"]
+  PAGE --> REVIEW["02-codex-review: plan + chapter-persistent review"]
+  REVIEW --> FINAL["03-final: hash-checked adjudication + locked snapshot + coordinate plan"]
+  PAGE --> FINAL
+  PAGE --> ERASE["04-erased: glyph mask + OpenCV inpaint"]
+  FINAL --> WRITE["05-pdf: Chinese-only writer"]
+  ERASE --> WRITE
+  PDF --> WRITE
   WRITE --> PQA["Full program checks"]
   PQA --> HV["Human visual acceptance"]

@@ -3,8 +3,8 @@ import pathlib
 import tempfile
 import unittest
 
-import codex_page_review as page_review
-import pdf_translation_writer as writer
+from pipeline import page_review
+from pipeline import pdf_writer as writer
 
 
 class PdfTranslationWriterTests(unittest.TestCase):

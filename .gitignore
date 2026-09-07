@@ -3,8 +3,10 @@ __pycache__/
 runs/
 node_modules/
 .env
+config/.env
+config/pipeline.json
 .secrets/
 *.log
 *.pdf
 tmp/
-ocr_config - 副本.json
+config/pipeline.local.json

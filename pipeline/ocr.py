@@ -36,6 +36,8 @@ import urllib.error
 import urllib.request
 from typing import Any
 
+from .paths import PROJECT_ROOT
+
 
 DEEPSEEK_PROMPT = "<image>\n<|grounding|>OCR this image."
 
@@ -2904,7 +2906,7 @@ def discover_config_path(argv: list[str]) -> pathlib.Path | None:
         return known.config.expanduser().resolve()
     manual_task_options = {"--pdf", "--pages", "--output"}
     if not any(option in argv for option in manual_task_options):
-        default_path = pathlib.Path(__file__).resolve().with_name("ocr_config.json")
+        default_path = pathlib.Path(__file__).resolve().parent.parent / "config" / "pipeline.json"
         if default_path.is_file():
             return default_path
     return None
@@ -2975,8 +2977,6 @@ def load_config_defaults(config_path: pathlib.Path) -> dict[str, Any]:
     direct_fields = {
         "pdf",
         "pages",
-        "output",
-        "mode",
         "long_edge",
         "pdftoppm_command",
         "workers",
@@ -2984,7 +2984,6 @@ def load_config_defaults(config_path: pathlib.Path) -> dict[str, Any]:
         "printed_page_offset",
         "resume",
         "redo_pages",
-        "log_file",
     }
     if "api_keys" in data:
         raise ValueError(
@@ -2995,10 +2994,9 @@ def load_config_defaults(config_path: pathlib.Path) -> dict[str, Any]:
         "translation",
         "model_profiles",
         "model_usage",
-        "pdf_backfill",
-        "pdf_translation_writer",
-        "codex_page_review",
-        "codex_book_review",
+        "pdf_writer",
+        "codex_review",
+        "toc_pages",
     }
     unknown = sorted(set(data) - allowed_fields)
     if unknown:
@@ -3021,9 +3019,9 @@ def load_config_defaults(config_path: pathlib.Path) -> dict[str, Any]:
         raise ValueError("config.pdf_backfill must be an object")
     defaults["pdf_backfill"] = pdf_backfill
 
-    codex_page_review = data.get("codex_page_review", {})
-    if not isinstance(codex_page_review, dict):
-        raise ValueError("config.codex_page_review must be an object")
+    codex_review = data.get("codex_review", {})
+    if not isinstance(codex_review, dict):
+        raise ValueError("config.codex_review must be an object")
 
     translation = data.get("translation", {})
     if not isinstance(translation, dict):
@@ -3055,19 +3053,13 @@ def load_config_defaults(config_path: pathlib.Path) -> dict[str, Any]:
         if config_name in translation:
             defaults[argument_name] = translation[config_name]
 
-    base = config_path.parent
-    for field in (
-        "pdf",
-        "output",
-        "log_file",
-        "pdftoppm_command",
-        "deepl_bridge_script",
-    ):
+    for field in ("pdf", "pdftoppm_command", "deepl_bridge_script"):
         value = defaults.get(field)
         if not value:
             continue
         path = pathlib.Path(value).expanduser()
         if not path.is_absolute():
+            base = config_path.parent if field == "deepl_bridge_script" else PROJECT_ROOT
             path = base / path
         defaults[field] = path.resolve()
     defaults["config"] = config_path
@@ -3120,7 +3112,7 @@ def build_parser(defaults: dict[str, Any] | None = None) -> argparse.ArgumentPar
     parser.add_argument(
         "--deepl-bridge-script",
         type=pathlib.Path,
-        default=pathlib.Path(__file__).resolve().with_name("deepl_mcp_client.mjs"),
+        default=pathlib.Path(__file__).resolve().parent.parent / "tools" / "deepl_mcp_client.mjs",
     )
     parser.add_argument("--log-file", type=pathlib.Path)
     parser.add_argument(
@@ -3306,7 +3298,7 @@ def resolve_pdf_backfill_settings(args: argparse.Namespace) -> dict[str, Any]:
     font_file = pathlib.Path(font_value).expanduser()
     if not font_file.is_absolute():
         font_file = pathlib.Path(__file__).resolve().parent / font_file
-    from pdf_backfill import merge_rules
+    from .pdf_backfill import merge_rules
 
     return {
         "output_pdf": output_path(
@@ -3339,7 +3331,7 @@ def build_final_translation_for_backfill(
     args: argparse.Namespace,
     pages: list[int],
 ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
-    from pdf_backfill import (
+    from .pdf_backfill import (
         build_final_translation_snapshot,
         load_human_translation_overrides,
     )
@@ -3504,7 +3496,7 @@ def validate_args(args: argparse.Namespace) -> list[int]:
             raise ValueError(
                 f"DeepL MCP bridge script not found: {args.deepl_bridge_script}"
             )
-        sdk_path = args.deepl_bridge_script.parent / "node_modules" / "@modelcontextprotocol" / "sdk"
+        sdk_path = pathlib.Path(__file__).resolve().parent.parent / "node_modules" / "@modelcontextprotocol" / "sdk"
         if not sdk_path.is_dir():
             raise RuntimeError(
                 "DeepL MCP SDK is missing; run npm install in the ocr-demo directory"
@@ -3552,12 +3544,14 @@ def validate_args(args: argparse.Namespace) -> list[int]:
     ):
         print("Output directory is not empty; use --resume or a new directory")
         #raise ValueError("Output directory is not empty; use --resume or a new directory")
-    args.output.mkdir(parents=True, exist_ok=True)
+    if not args.dry_run:
+        args.output.mkdir(parents=True, exist_ok=True)
     return pages
 
 
-def main() -> int:
-    config_path = discover_config_path(sys.argv[1:])
+def main(argv: list[str] | None = None) -> int:
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    config_path = discover_config_path(arguments)
     env_path = (
         config_path.parent if config_path else pathlib.Path(__file__).resolve().parent
     ) / ".env"
@@ -3572,7 +3566,7 @@ def main() -> int:
         except Exception as error:
             build_parser().error(str(error))
     parser = build_parser(defaults)
-    args = parser.parse_args()
+    args = parser.parse_args(arguments)
     if args.pdf is not None:
         args.pdf = args.pdf.expanduser().resolve()
     if args.output is not None:
@@ -3610,16 +3604,9 @@ def main() -> int:
                             "layout_ocr": args.layout_profile_config["name"],
                             "primary_ocr": args.primary_profile_config["name"],
                             "ocr_verifier": args.verifier_profile_config["name"],
-                            "qwen_translation": args.translation_profile_config["name"],
-                            "translation_verifier": args.translation_verifier_profile_config["name"],
-                            "chapter_review": [
-                                profile["name"]
-                                for profile in args.resolved_chapter_review_models
-                            ],
                         },
                         "siliconflow_key_configured": bool(args.siliconflow_key),
                         "dashscope_key_configured": bool(args.dashscope_key),
-                        "deepseek_key_configured": bool(args.deepseek_key),
                     },
                     ensure_ascii=False,
                 ),
@@ -3639,7 +3626,7 @@ def main() -> int:
                 )
                 return 0
             if args.export_pdf == "chinese":
-                from pdf_backfill import (
+                from .pdf_backfill import (
                     build_ai_spotcheck_request,
                     build_backfill_plan,
                     export_chinese_pdf,

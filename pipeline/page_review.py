@@ -140,9 +140,9 @@ def load_settings(config_path: pathlib.Path) -> CodexSettings:
     data = read_json(config_path, jsonc=True)
     if not isinstance(data, dict):
         raise CodexPageReviewError("Config root must be a JSON object")
-    raw = data.get("codex_page_review", {})
+    raw = data.get("codex_review", {})
     if not isinstance(raw, dict):
-        raise CodexPageReviewError("config.codex_page_review must be an object")
+        raise CodexPageReviewError("config.codex_review must be an object")
     allowed = {
         "command",
         "model",
@@ -151,11 +151,14 @@ def load_settings(config_path: pathlib.Path) -> CodexSettings:
         "image_mode",
         "include_image",
         "require_chatgpt_login",
+        "toc_image_detail",
+        "exclude_preliminary",
+        "exclude_back_matter",
     }
     unknown = sorted(set(raw) - allowed)
     if unknown:
         raise CodexPageReviewError(
-            "Unknown codex_page_review fields: " + ", ".join(unknown)
+            "Unknown codex_review fields: " + ", ".join(unknown)
         )
 
     command = str(raw.get("command", "codex")).strip()
@@ -166,50 +169,50 @@ def load_settings(config_path: pathlib.Path) -> CodexSettings:
     timeout_raw = raw.get("timeout_seconds", DEFAULT_TIMEOUT_SECONDS)
     if "image_mode" in raw and "include_image" in raw:
         raise CodexPageReviewError(
-            "Use codex_page_review.image_mode instead of combining it with include_image"
+            "Use codex_review.image_mode instead of combining it with include_image"
         )
     if "image_mode" in raw:
         image_mode = str(raw["image_mode"]).strip()
     elif "include_image" in raw:
         legacy_include_image = raw["include_image"]
         if not isinstance(legacy_include_image, bool):
-            raise CodexPageReviewError("codex_page_review.include_image must be boolean")
+            raise CodexPageReviewError("codex_review.include_image must be boolean")
         image_mode = "always" if legacy_include_image else "never"
     else:
         image_mode = "on_demand"
     require_chatgpt_login = raw.get("require_chatgpt_login", True)
 
     if not command:
-        raise CodexPageReviewError("codex_page_review.command must not be empty")
+        raise CodexPageReviewError("codex_review.command must not be empty")
     if not model:
-        raise CodexPageReviewError("codex_page_review.model must not be empty")
+        raise CodexPageReviewError("codex_review.model must not be empty")
     if reasoning_effort not in ALLOWED_REASONING_EFFORTS:
         raise CodexPageReviewError(
-            "codex_page_review.reasoning_effort must be one of: "
+            "codex_review.reasoning_effort must be one of: "
             + ", ".join(sorted(ALLOWED_REASONING_EFFORTS))
         )
     if isinstance(timeout_raw, bool):
         raise CodexPageReviewError(
-            "codex_page_review.timeout_seconds must be a positive integer"
+            "codex_review.timeout_seconds must be a positive integer"
         )
     try:
         timeout_seconds = int(timeout_raw)
     except (TypeError, ValueError) as error:
         raise CodexPageReviewError(
-            "codex_page_review.timeout_seconds must be a positive integer"
+            "codex_review.timeout_seconds must be a positive integer"
         ) from error
     if timeout_seconds < 1:
         raise CodexPageReviewError(
-            "codex_page_review.timeout_seconds must be a positive integer"
+            "codex_review.timeout_seconds must be a positive integer"
         )
     if image_mode not in ALLOWED_IMAGE_MODES:
         raise CodexPageReviewError(
-            "codex_page_review.image_mode must be one of: "
+            "codex_review.image_mode must be one of: "
             + ", ".join(sorted(ALLOWED_IMAGE_MODES))
         )
     if not isinstance(require_chatgpt_login, bool):
         raise CodexPageReviewError(
-            "codex_page_review.require_chatgpt_login must be boolean"
+            "codex_review.require_chatgpt_login must be boolean"
         )
     return CodexSettings(
         command=command,
@@ -510,7 +513,7 @@ def resolve_codex_command(command: str) -> str:
 
     raise CodexPageReviewError(
         f"Codex CLI not found: {command}. Install/sign in to Codex, add it to PATH, "
-        "or set codex_page_review.command to the absolute executable path."
+        "or set codex_review.command to the absolute executable path."
     )
 
 
@@ -1128,7 +1131,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config",
         type=pathlib.Path,
-        default=pathlib.Path(__file__).resolve().with_name("ocr_config.json"),
+        default=pathlib.Path(__file__).resolve().parent.parent / "config" / "pipeline.json",
     )
     page_group = parser.add_mutually_exclusive_group(required=True)
     page_group.add_argument(
