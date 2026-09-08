@@ -9,6 +9,7 @@ import unittest
 from unittest import mock
 
 from pipeline import page_review as review
+from pipeline.paths import PROJECT_ROOT, RUNTIME_TEMP_ROOT
 
 
 class CodexPageReviewTests(unittest.TestCase):
@@ -129,6 +130,19 @@ class CodexPageReviewTests(unittest.TestCase):
         self.assertEqual(settings.image_mode, "on_demand")
         self.assertTrue(settings.require_chatgpt_login)
 
+    def test_load_settings_reads_ignore_hash_validation(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config, _page_json = self.make_fixture(pathlib.Path(temporary))
+            config.write_text(
+                config.read_text(encoding="utf-8").replace(
+                    '"codex_review": {',
+                    '"ignore_hash_validation": true,\n              "codex_review": {',
+                ),
+                encoding="utf-8",
+            )
+            settings = review.load_settings(config)
+        self.assertTrue(settings.ignore_hash_validation)
+
     def test_page_markdown_is_not_read_or_hashed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             _config, page_json = self.make_fixture(pathlib.Path(temporary))
@@ -168,7 +182,7 @@ class CodexPageReviewTests(unittest.TestCase):
 
     def test_invoke_codex_uses_saved_chatgpt_login_and_no_api_keys(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            config, page_json = self.make_fixture(pathlib.Path(temporary))
+            config, page_json = self.make_fixture(pathlib.Path(temporary).resolve())
             settings = review.load_settings(config)
             inputs = review.load_page_inputs(page_json, include_image=True)
             calls: list[tuple[list[str], dict]] = []
@@ -286,9 +300,17 @@ class CodexPageReviewTests(unittest.TestCase):
             ):
                 review.verify_inputs_unchanged(inputs)
 
-    def test_dry_run_does_not_invoke_codex_or_write_output(self) -> None:
+    def test_ignore_hash_validation_allows_changed_review_input(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
-            config, page_json = self.make_fixture(pathlib.Path(temporary))
+            _config, page_json = self.make_fixture(pathlib.Path(temporary))
+            inputs = review.load_page_inputs(page_json, include_image=True)
+            inputs.json_path.write_text("{}\n", encoding="utf-8")
+            review.verify_inputs_unchanged(inputs, ignore_hash_validation=True)
+
+    def test_dry_run_does_not_invoke_codex_or_write_output(self) -> None:
+        RUNTIME_TEMP_ROOT.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=RUNTIME_TEMP_ROOT) as temporary:
+            config, page_json = self.make_fixture(pathlib.Path(temporary).resolve())
             output = page_json.with_name("custom-review.json")
             output.write_text('{"existing":true}\n', encoding="utf-8")
             stdout = io.StringIO()
@@ -302,11 +324,11 @@ class CodexPageReviewTests(unittest.TestCase):
                 status = review.main(
                     [
                         "--config",
-                        str(config),
+                        str(config.relative_to(PROJECT_ROOT)),
                         "--page-json",
-                        str(page_json),
+                        str(page_json.relative_to(PROJECT_ROOT)),
                         "--output",
-                        str(output),
+                        str(output.relative_to(PROJECT_ROOT)),
                         "--dry-run",
                     ]
                 )
@@ -322,8 +344,9 @@ class CodexPageReviewTests(unittest.TestCase):
             self.assertFalse(summary["would_invoke_codex"])
 
     def test_main_writes_separate_validated_result(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            config, page_json = self.make_fixture(pathlib.Path(temporary))
+        RUNTIME_TEMP_ROOT.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=RUNTIME_TEMP_ROOT) as temporary:
+            config, page_json = self.make_fixture(pathlib.Path(temporary).resolve())
             output = page_json.with_name("page-0053-codex-review.json")
             stdout = io.StringIO()
             with (
@@ -349,9 +372,9 @@ class CodexPageReviewTests(unittest.TestCase):
                 status = review.main(
                     [
                         "--config",
-                        str(config),
+                        str(config.relative_to(PROJECT_ROOT)),
                         "--page-json",
-                        str(page_json),
+                        str(page_json.relative_to(PROJECT_ROOT)),
                     ]
                 )
             saved = json.loads(output.read_text(encoding="utf-8"))

@@ -1,0 +1,530 @@
+
+下面是这版 `erase_v2.py` 的使用说明总结。
+
+## 1. 作用
+
+V2 不再逐像素判断“哪些像素属于文字”，而是直接对 OCR 文本区域进行整体覆盖。
+
+处理流程：
+
+```text
+DeepSeek OCR bbox
+        ↓
+相邻行合并为文本块
+        ↓
+尝试识别闭合气泡
+   ┌────┴────┐
+成功       失败
+ ↓           ↓
+整个气泡    整个文本块矩形
+内部覆盖    直接覆盖
+```
+
+填充颜色从文字附近背景区域取样，并使用 `median` 等稳健统计方法计算。
+
+**不会运行 PaddleOCR、Tesseract 等补充 OCR，只使用 JSON 中已有的 `layout.content`。**
+
+---
+
+## 2. 环境依赖
+
+```bash
+pip install numpy opencv-python-headless
+```
+
+脚本：
+
+[下载 erase_v2.py](sandbox:/mnt/data/erase_v2.py)
+
+---
+
+## 3. 单页处理
+
+需要：
+
+```text
+page-0019.png
+page-0019.json
+```
+
+其中 JSON 中必须已经存在 DeepSeek OCR 结果，例如：
+
+```text
+<|ref|>Avast, me<|/ref|><|det|>[[300,30,400,47]]<|/det|>
+```
+
+推荐命令：
+
+```bash
+python erase_v2.py \
+  --image page-0019.png \
+  --json page-0019.json \
+  --output-dir output
+```
+
+默认等同于：
+
+```bash
+--strategy auto
+```
+
+---
+
+## 4. 批量处理
+
+目录中采用同名 PNG + JSON：
+
+```text
+pages/
+├── page-0001.png
+├── page-0001.json
+├── page-0002.png
+├── page-0002.json
+├── page-0003.png
+└── page-0003.json
+```
+
+运行：
+
+```bash
+python erase_v2.py \
+  --pages-dir pages \
+  --output-dir output
+```
+
+注意：批处理模式目前扫描的是 **PNG**，并要求每个 PNG 都有同名 JSON；缺少 JSON 会直接报错。
+
+---
+
+## 5. 三种擦除策略
+
+### `auto`：推荐
+
+```bash
+--strategy auto
+```
+
+逻辑：
+
+```text
+能可靠找到闭合气泡
+    → 整个气泡内部覆盖
+
+找不到 / 判断不可靠
+    → 回退到文本块矩形覆盖
+```
+
+这是正常批处理推荐模式。
+
+---
+
+### `block`：最简单、最好排查
+
+```bash
+--strategy block
+```
+
+完全不识别气泡：
+
+```text
+OCR 行
+ → 合并为文本块
+ → 大矩形直接覆盖
+```
+
+例如：
+
+```bash
+python erase_v2.py \
+  --image page-0019.png \
+  --json page-0019.json \
+  --output-dir output \
+  --strategy block
+```
+
+如果要先验证“整块擦除是否能解决残留”，优先使用这个模式。
+
+---
+
+### `bubble`
+
+```bash
+--strategy bubble
+```
+
+尝试气泡检测；当前实现中，如果气泡检测失败，同样会回退到 block。
+
+因此现阶段实际使用时，通常直接用：
+
+```text
+auto
+block
+```
+
+即可。
+
+---
+
+## 6. 输出文件
+
+假设输入：
+
+```text
+page-0019.png
+```
+
+会生成：
+
+```text
+output/
+├── page-0019.cleaned.png
+├── page-0019.mask.png
+├── page-0019.debug.png
+└── page-0019.adjusted.json
+```
+
+其中：
+
+| 文件              | 用途                               |
+| --------------- | -------------------------------- |
+| `cleaned.png`   | 最终擦除后的图片                         |
+| `mask.png`      | 实际被覆盖的区域，白色表示擦除                  |
+| `debug.png`     | 文本块和 bubble 判断调试图                |
+| `adjusted.json` | OCR region、block 分组、填充颜色、策略等完整记录 |
+
+调试时优先看：
+
+```text
+debug.png
+mask.png
+```
+
+---
+
+## 7. 最常用参数
+
+### 文本块额外扩展
+
+默认：
+
+```bash
+--block-padding 2
+```
+
+表示文本块 bbox 外扩 2px。
+
+如果发现字符边缘仍超出 OCR 框：
+
+```bash
+--block-padding 3
+```
+
+或：
+
+```bash
+--block-padding 4
+```
+
+不建议一开始调得太大，否则可能覆盖气泡边线或人物。
+
+---
+
+### 背景取色宽度
+
+默认：
+
+```bash
+--ring-width 3
+```
+
+实际上优先从**每个原始 OCR 行 bbox 外围**的 3px ring 采样，而不是简单从最终大框外围取色。
+
+如果扫描噪点较重，可以尝试：
+
+```bash
+--ring-width 4
+```
+
+或：
+
+```bash
+--ring-width 5
+```
+
+---
+
+### 填充颜色算法
+
+默认：
+
+```bash
+--fill-stat median
+```
+
+推荐保持默认。
+
+也支持：
+
+```bash
+--fill-stat trimmed-mean
+```
+
+一般漫画、扫描教材建议：
+
+```text
+median
+```
+
+因为比较不容易受黑色边线、字符和噪声影响。
+
+---
+
+## 8. OCR 行合并参数
+
+这是 V2 比较关键的一组参数。
+
+### 行间距
+
+默认：
+
+```bash
+--group-line-gap-ratio 0.20
+```
+
+控制上下两行是否属于同一个文本块。
+
+如果出现：
+
+```text
+同一个气泡里的文字被拆成多个 block
+```
+
+可以逐步提高：
+
+```bash
+--group-line-gap-ratio 0.25
+```
+
+再例如：
+
+```bash
+0.30
+```
+
+如果出现：
+
+```text
+两个相邻气泡被错误合并
+```
+
+则降低，比如：
+
+```bash
+--group-line-gap-ratio 0.15
+```
+
+---
+
+### 水平中心偏移
+
+默认：
+
+```bash
+--group-center-drift-ratio 0.55
+```
+
+如果同一段文字各行长短差异较大，导致不能合并，可以提高：
+
+```bash
+--group-center-drift-ratio 0.65
+```
+
+如果相邻的左右文字块容易被误合并，则降低。
+
+---
+
+## 9. Bubble 检测参数
+
+一般不用主动调整。
+
+### 背景颜色容差
+
+默认：
+
+```bash
+--bubble-color-distance 18
+```
+
+这是 Lab 色彩空间中的背景连通阈值。
+
+如果气泡背景有明显扫描纹理，导致气泡一直检测失败，可以尝试：
+
+```bash
+--bubble-color-distance 20
+```
+
+或：
+
+```bash
+22
+```
+
+但不要盲目增大。
+
+过大会导致颜色连通区域穿过气泡边界，扩展到 panel 背景。
+
+---
+
+### Bubble 最大面积保护
+
+默认：
+
+```bash
+--bubble-max-area-ratio 8.0
+--bubble-max-image-ratio 0.12
+```
+
+它们主要用于防止误把：
+
+```text
+整个 panel
+整个页面背景
+```
+
+识别成气泡。
+
+如果发现 mask 异常覆盖很大区域，应优先：
+
+1. 使用 `--strategy block`
+2. 或降低 `--bubble-max-image-ratio`
+
+例如：
+
+```bash
+--bubble-max-image-ratio 0.08
+```
+
+---
+
+## 10. 页码
+
+默认不会删除底部中央纯数字页码。
+
+例如当前：
+
+```text
+18
+```
+
+默认保留。
+
+如果希望一起擦除：
+
+```bash
+--remove-page-number
+```
+
+---
+
+## 11. 调试 OCR 原始框
+
+默认 `debug.png` 主要展示合并后的 block。
+
+如果需要同时查看每一个 DeepSeek OCR 行：
+
+```bash
+--debug-show-lines
+```
+
+例如：
+
+```bash
+python erase_v2.py \
+  --image page-0019.png \
+  --json page-0019.json \
+  --output-dir output \
+  --strategy auto \
+  --debug-show-lines
+```
+
+这个模式比较适合调：
+
+```text
+为什么某几行没有合成一个 block？
+为什么两个 block 被合并了？
+```
+
+---
+
+## 12. 推荐调试顺序
+
+如果以后遇到某页效果异常，我建议固定按这个顺序排查：
+
+```text
+① 先看 debug.png
+        ↓
+② 确认 OCR bbox 是否正确
+        ↓
+③ 确认文本行 grouping 是否正确
+        ↓
+④ 用 --strategy block 跑一次
+        ↓
+⑤ block 正常后再打开 auto
+        ↓
+⑥ 最后才调整 bubble 参数
+```
+
+也就是说，**不要一开始就调 bubble threshold。**
+
+先保证：
+
+```text
+OCR bbox → block grouping → 整块覆盖
+```
+
+这条基础链路稳定。
+
+---
+
+## 13. 常见问题对应参数
+
+| 现象                   | 优先处理                            |
+| -------------------- | ------------------------------- |
+| 字符边缘还有一点残留           | 增大 `--block-padding`            |
+| 一个气泡被拆成多个文本块         | 增大 `--group-line-gap-ratio`     |
+| 两个气泡错误合成一个块          | 减小 `--group-line-gap-ratio`     |
+| 同段文字左右变化大无法合并        | 增大 `--group-center-drift-ratio` |
+| bubble 经常检测不到        | 稍增 `--bubble-color-distance`    |
+| bubble 错误扩大到整个 panel | 降低 bubble 容差/面积上限，或改用 `block`   |
+| 填充色受黑线影响             | 保持 `median`，可增大 `--ring-width`  |
+| 想完全排除 bubble 算法问题    | `--strategy block`              |
+
+---
+
+## 14. 当前建议的生产配置
+
+先从默认配置开始即可：
+
+```bash
+python erase_v2.py \
+  --pages-dir pages \
+  --output-dir output \
+  --strategy auto \
+  --block-padding 2 \
+  --ring-width 3 \
+  --fill-stat median
+```
+
+如果是首次跑一批新教材，我更建议先抽样使用：
+
+```bash
+--strategy block
+```
+
+检查 20～50 页。
+
+确认文本分组本身稳定后，再切换：
+
+```bash
+--strategy auto
+```

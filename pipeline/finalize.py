@@ -18,6 +18,8 @@ from typing import Any
 
 from . import codex_review as book_review
 from . import page_review
+from .config import get_ignore_hash_validation
+from .paths import DEFAULT_CONFIG, project_relative_path, use_project_working_directory
 from .pdf_backfill import (
     build_backfill_plan,
     build_final_translation_snapshot,
@@ -57,9 +59,9 @@ def resolve_config_path(
     if value is None or not str(value).strip():
         return None
     path = pathlib.Path(value).expanduser()
-    if not path.is_absolute():
-        path = (output_dir or config_path.parent) / path
-    return path.resolve()
+    if path.is_absolute():
+        return project_relative_path(path, label="Configured output path")
+    return (output_dir or pathlib.Path()) / path
 
 
 def plan_page_tasks(plan: dict[str, Any]) -> dict[int, dict[str, Any]]:
@@ -95,6 +97,7 @@ def validate_review_result(
     page_json: pathlib.Path,
     task: dict[str, Any],
     plan_sha256: str,
+    ignore_hash_validation: bool = False,
 ) -> dict[str, Any]:
     page = int(page_record["page"])
     if review.get("schema_version") != 5:
@@ -106,15 +109,19 @@ def validate_review_result(
         raise FinalizeError(f"Review has no book_task metadata: {review_path}")
     if book_task.get("task_id") != task["task_id"]:
         raise FinalizeError(f"Review belongs to a different task: {review_path}")
-    if book_task.get("plan_sha256") != plan_sha256:
+    if not ignore_hash_validation and book_task.get("plan_sha256") != plan_sha256:
         raise FinalizeError(f"Review belongs to a different book plan: {review_path}")
     inputs = review.get("inputs")
-    if not isinstance(inputs, dict) or not isinstance(inputs.get("files"), dict):
+    if not isinstance(inputs, dict):
         raise FinalizeError(f"Review input hashes are missing: {review_path}")
-    expected_hash = inputs["files"].get(page_json.name)
-    actual_hash = page_review.sha256_file(page_json)
-    if expected_hash != actual_hash:
-        raise FinalizeError(f"Page JSON changed after Codex review: {page_json.name}")
+    files = inputs.get("files")
+    if not ignore_hash_validation and not isinstance(files, dict):
+        raise FinalizeError(f"Review input hashes are missing: {review_path}")
+    if not ignore_hash_validation:
+        expected_hash = files.get(page_json.name) if isinstance(files, dict) else None
+        actual_hash = page_review.sha256_file(page_json)
+        if expected_hash != actual_hash:
+            raise FinalizeError(f"Page JSON changed after Codex review: {page_json.name}")
     regions = page_record.get("study", {}).get("regions")
     if not isinstance(regions, list):
         raise FinalizeError(f"Page JSON has no study.regions: {page_json}")
@@ -164,8 +171,11 @@ def merge_book_reviews(
     pages_dir: pathlib.Path,
     reviews_dir: pathlib.Path,
     source_pdf: pathlib.Path,
+    ignore_hash_validation: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    book_review.validate_plan_sources(plan, source_pdf)
+    book_review.validate_plan_sources(
+        plan, source_pdf, ignore_hash_validation=ignore_hash_validation
+    )
     tasks_by_page = plan_page_tasks(plan)
     plan_sha256 = page_review.sha256_file(plan_path)
     reviewed_records: list[dict[str, Any]] = []
@@ -197,6 +207,7 @@ def merge_book_reviews(
             page_json=page_json,
             task=task,
             plan_sha256=plan_sha256,
+            ignore_hash_validation=ignore_hash_validation,
         )
         merged_record = copy.deepcopy(page_record)
         merged_regions = {
@@ -216,9 +227,7 @@ def merge_book_reviews(
             decisions.append(dict(decision, task_id=task["task_id"]))
         reviewed_records.append(merged_record)
         page_hashes[page_json.name] = page_review.sha256_file(page_json)
-        review_hashes[str(review_path.relative_to(reviews_dir.parent))] = validated[
-            "review_sha256"
-        ]
+        review_hashes[str(review_path)] = validated["review_sha256"]
         codex = review.get("codex", {})
         if isinstance(codex, dict) and isinstance(codex.get("thread_id"), str):
             existing = thread_ids.get(str(task["task_id"]))
@@ -259,7 +268,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config",
         type=pathlib.Path,
-        default=pathlib.Path(__file__).resolve().parent.parent / "config" / "pipeline.json",
+        default=DEFAULT_CONFIG,
     )
     parser.add_argument("--pdf", type=pathlib.Path)
     parser.add_argument("--pages-dir", type=pathlib.Path)
@@ -275,36 +284,45 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    use_project_working_directory()
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        config_path = args.config.expanduser().resolve()
+        config_path = project_relative_path(args.config, label="Configuration path")
         config = book_review.read_json(config_path, jsonc=True)
         if not isinstance(config, dict):
             raise FinalizeError("Config root must be an object")
+        try:
+            ignore_hash_validation = get_ignore_hash_validation(config)
+        except ValueError as error:
+            raise FinalizeError(str(error)) from error
         configured_output = book_review.resolve_config_path(
             config.get("output"), config_path=config_path
         )
         base_output = configured_output or (
-            args.output.expanduser().resolve().parent if args.output else None
+            project_relative_path(args.output, label="Final translation output").parent
+            if args.output
+            else None
         )
         if base_output is None:
             raise FinalizeError("--output is required when config has no output directory")
         source_pdf = (
-            args.pdf.expanduser().resolve()
+            project_relative_path(args.pdf, label="Source PDF path")
             if args.pdf
             else book_review.resolve_config_path(config.get("pdf"), config_path=config_path)
         )
         if source_pdf is None or not source_pdf.is_file():
             raise FinalizeError(f"Source PDF not found: {source_pdf}")
         pages_dir = (
-            args.pages_dir.expanduser().resolve()
+            project_relative_path(args.pages_dir, label="OCR pages directory")
             if args.pages_dir
             else base_output / "pages"
         )
-        review_root = args.book_review_dir.expanduser().resolve()
+        review_root = project_relative_path(
+            args.book_review_dir, label="Codex review directory"
+        )
         plan_path = (
-            args.plan.expanduser().resolve()
+            project_relative_path(args.plan, label="Codex review plan")
             if args.plan
             else review_root / "book-review-plan.json"
         )
@@ -313,7 +331,7 @@ def main(argv: list[str] | None = None) -> int:
         if not isinstance(backfill, dict):
             raise FinalizeError("config.pdf_backfill must be an object")
         snapshot_path = (
-            args.output.expanduser().resolve()
+            project_relative_path(args.output, label="Final translation output")
             if args.output
             else resolve_config_path(
                 backfill.get("final_translation_filename", "chapter_translation_final.json"),
@@ -322,7 +340,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         coordinate_plan_path = (
-            args.backfill_plan.expanduser().resolve()
+            project_relative_path(args.backfill_plan, label="PDF backfill plan")
             if args.backfill_plan
             else resolve_config_path(
                 backfill.get("plan_filename", "pdf_backfill_plan.json"),
@@ -331,12 +349,16 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         adjudication_path = (
-            args.adjudication_output.expanduser().resolve()
+            project_relative_path(
+                args.adjudication_output, label="Codex adjudication output"
+            )
             if args.adjudication_output
             else review_root / "book-codex-adjudication.json"
         )
         override_path = (
-            args.human_overrides.expanduser().resolve()
+            project_relative_path(
+                args.human_overrides, label="Human translation overrides"
+            )
             if args.human_overrides
             else resolve_config_path(
                 backfill.get("human_translation_overrides_filename", ""),
@@ -394,6 +416,7 @@ def main(argv: list[str] | None = None) -> int:
             pages_dir=pages_dir,
             reviews_dir=reviews_dir,
             source_pdf=source_pdf,
+            ignore_hash_validation=ignore_hash_validation,
         )
         atomic_write_json(adjudication_path, aggregate)
         human_overrides = load_human_translation_overrides(override_path)

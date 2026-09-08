@@ -36,7 +36,11 @@ import urllib.error
 import urllib.request
 from typing import Any
 
-from .paths import PROJECT_ROOT
+from .paths import (
+    DEFAULT_CONFIG,
+    project_relative_path,
+    use_project_working_directory,
+)
 
 
 DEEPSEEK_PROMPT = "<image>\n<|grounding|>OCR this image."
@@ -2253,6 +2257,8 @@ def sha256_file(path: pathlib.Path) -> str:
 def verify_adjudication_inputs(
     output: pathlib.Path,
     adjudication: dict[str, Any],
+    *,
+    ignore_hash_validation: bool = False,
 ) -> None:
     expected = adjudication.get("inputs", {})
     if not isinstance(expected, dict):
@@ -2267,14 +2273,17 @@ def verify_adjudication_inputs(
                 f"Adjudication input filename must not contain a path: {filename}"
             )
         expected_hash = str(raw_hash).strip().lower()
-        if not re.fullmatch(r"[0-9a-f]{64}", expected_hash):
+        if (
+            not ignore_hash_validation
+            and not re.fullmatch(r"[0-9a-f]{64}", expected_hash)
+        ):
             raise ValueError(
                 f"Adjudication has an invalid SHA-256 for {filename}"
             )
         path = output / filename
         if not path.is_file():
             raise ValueError(f"Adjudication source file is missing: {path}")
-        if sha256_file(path) != expected_hash:
+        if not ignore_hash_validation and sha256_file(path) != expected_hash:
             raise ValueError(
                 f"Adjudication source changed after review: {filename}"
             )
@@ -2903,10 +2912,10 @@ def discover_config_path(argv: list[str]) -> pathlib.Path | None:
     pre_parser.add_argument("--config", type=pathlib.Path)
     known, _ = pre_parser.parse_known_args(argv)
     if known.config:
-        return known.config.expanduser().resolve()
+        return project_relative_path(known.config, label="Configuration path")
     manual_task_options = {"--pdf", "--pages", "--output"}
     if not any(option in argv for option in manual_task_options):
-        default_path = pathlib.Path(__file__).resolve().parent.parent / "config" / "pipeline.json"
+        default_path = DEFAULT_CONFIG
         if default_path.is_file():
             return default_path
     return None
@@ -2981,6 +2990,7 @@ def load_config_defaults(config_path: pathlib.Path) -> dict[str, Any]:
         "pdftoppm_command",
         "workers",
         "verify",
+        "ignore_hash_validation",
         "printed_page_offset",
         "resume",
         "redo_pages",
@@ -3058,10 +3068,12 @@ def load_config_defaults(config_path: pathlib.Path) -> dict[str, Any]:
         if not value:
             continue
         path = pathlib.Path(value).expanduser()
-        if not path.is_absolute():
-            base = config_path.parent if field == "deepl_bridge_script" else PROJECT_ROOT
-            path = base / path
-        defaults[field] = path.resolve()
+        if field == "pdftoppm_command":
+            defaults[field] = path
+        else:
+            defaults[field] = project_relative_path(
+                path, label=f"Configured {field}"
+            )
     defaults["config"] = config_path
     return defaults
 
@@ -3112,7 +3124,7 @@ def build_parser(defaults: dict[str, Any] | None = None) -> argparse.ArgumentPar
     parser.add_argument(
         "--deepl-bridge-script",
         type=pathlib.Path,
-        default=pathlib.Path(__file__).resolve().parent.parent / "tools" / "deepl_mcp_client.mjs",
+        default=pathlib.Path("tools") / "deepl_mcp_client.mjs",
     )
     parser.add_argument("--log-file", type=pathlib.Path)
     parser.add_argument(
@@ -3137,6 +3149,7 @@ def build_parser(defaults: dict[str, Any] | None = None) -> argparse.ArgumentPar
         build_final_translation=False,
         export_pdf=None,
         adjudication_file=None,
+        ignore_hash_validation=False,
     )
     if defaults:
         parser.set_defaults(**defaults)
@@ -3282,22 +3295,21 @@ def resolve_pdf_backfill_settings(args: argparse.Namespace) -> dict[str, Any]:
         if not value:
             raise ValueError(f"pdf_backfill.{field} cannot be empty")
         path = pathlib.Path(value).expanduser()
-        if not path.is_absolute():
-            path = args.output / path
-        return path.resolve()
+        if path.is_absolute():
+            return project_relative_path(path, label=f"pdf_backfill.{field}")
+        return args.output / path
 
     font_value = str(
         raw.get(
             "font_file",
-            "/System/Library/AssetsV2/com_apple_MobileAsset_Font7/"
-            "eb257c12d1a51c8c661b89f30eec56cacf9b8987.asset/AssetData/STHEITI.ttf",
+            "assets/fonts/simhei.ttf",
         )
     ).strip()
     if not font_value:
         raise ValueError("pdf_backfill.font_file cannot be empty")
-    font_file = pathlib.Path(font_value).expanduser()
-    if not font_file.is_absolute():
-        font_file = pathlib.Path(__file__).resolve().parent / font_file
+    font_file = project_relative_path(
+        pathlib.Path(font_value), label="pdf_backfill.font_file"
+    )
     from .pdf_backfill import merge_rules
 
     return {
@@ -3312,7 +3324,7 @@ def resolve_pdf_backfill_settings(args: argparse.Namespace) -> dict[str, Any]:
         "spotcheck": output_path(
             "spotcheck_filename", "ai_spotcheck_request.json"
         ),
-        "font_file": font_file.resolve(),
+        "font_file": font_file,
         "human_translation_overrides": output_path(
             "human_translation_overrides_filename",
             "",
@@ -3349,7 +3361,11 @@ def build_final_translation_for_backfill(
     adjudication = json.loads(
         args.adjudication_file.read_text(encoding="utf-8")
     )
-    verify_adjudication_inputs(args.output, adjudication)
+    verify_adjudication_inputs(
+        args.output,
+        adjudication,
+        ignore_hash_validation=args.ignore_hash_validation,
+    )
     all_reviewed_records, _application = apply_chapter_adjudication(
         chapter_records, adjudication
     )
@@ -3392,6 +3408,8 @@ def validate_args(args: argparse.Namespace) -> list[int]:
         raise ValueError("--pages is required (or set pages in the config)")
     if args.output is None:
         raise ValueError("--output is required (or set output in the config)")
+    if not isinstance(args.ignore_hash_validation, bool):
+        raise ValueError("ignore_hash_validation must be boolean")
     if not args.pdf.is_file():
         raise ValueError(f"PDF not found: {args.pdf}")
     args.pdftoppm_command = find_poppler_pdftoppm(args.pdftoppm_command)
@@ -3496,7 +3514,7 @@ def validate_args(args: argparse.Namespace) -> list[int]:
             raise ValueError(
                 f"DeepL MCP bridge script not found: {args.deepl_bridge_script}"
             )
-        sdk_path = pathlib.Path(__file__).resolve().parent.parent / "node_modules" / "@modelcontextprotocol" / "sdk"
+        sdk_path = pathlib.Path("node_modules") / "@modelcontextprotocol" / "sdk"
         if not sdk_path.is_dir():
             raise RuntimeError(
                 "DeepL MCP SDK is missing; run npm install in the ocr-demo directory"
@@ -3550,10 +3568,11 @@ def validate_args(args: argparse.Namespace) -> list[int]:
 
 
 def main(argv: list[str] | None = None) -> int:
+    use_project_working_directory()
     arguments = list(sys.argv[1:] if argv is None else argv)
     config_path = discover_config_path(arguments)
     env_path = (
-        config_path.parent if config_path else pathlib.Path(__file__).resolve().parent
+        config_path.parent if config_path else pathlib.Path("config")
     ) / ".env"
     try:
         load_env_file(env_path)
@@ -3568,15 +3587,19 @@ def main(argv: list[str] | None = None) -> int:
     parser = build_parser(defaults)
     args = parser.parse_args(arguments)
     if args.pdf is not None:
-        args.pdf = args.pdf.expanduser().resolve()
+        args.pdf = project_relative_path(args.pdf, label="Source PDF path")
     if args.output is not None:
-        args.output = args.output.expanduser().resolve()
+        args.output = project_relative_path(args.output, label="OCR output directory")
     if args.log_file is not None:
-        args.log_file = args.log_file.expanduser().resolve()
+        args.log_file = project_relative_path(args.log_file, label="OCR log file")
     if args.adjudication_file is not None:
-        args.adjudication_file = args.adjudication_file.expanduser().resolve()
-    args.deepl_bridge_script = args.deepl_bridge_script.expanduser().resolve()
-    args.deepl_env_file = env_path.resolve()
+        args.adjudication_file = project_relative_path(
+            args.adjudication_file, label="Codex adjudication file"
+        )
+    args.deepl_bridge_script = project_relative_path(
+        args.deepl_bridge_script, label="DeepL MCP bridge script"
+    )
+    args.deepl_env_file = env_path
     args.siliconflow_key = getattr(args, "siliconflow_key", "") or os.environ.get(
         "SILICONFLOW_API_KEY", ""
     )
@@ -3693,7 +3716,11 @@ def main(argv: list[str] | None = None) -> int:
                 adjudication = json.loads(
                     args.adjudication_file.read_text(encoding="utf-8")
                 )
-                verify_adjudication_inputs(args.output, adjudication)
+                verify_adjudication_inputs(
+                    args.output,
+                    adjudication,
+                    ignore_hash_validation=args.ignore_hash_validation,
+                )
                 reviewed_records, application = apply_chapter_adjudication(
                     chapter_records, adjudication
                 )

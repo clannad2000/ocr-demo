@@ -11,6 +11,7 @@
 | `review` | `pipeline.codex_review` | 目录计划与分章持久Codex复核 |
 | `finalize` | `pipeline.finalize` | 裁决聚合、锁定译文、坐标计划 |
 | `erase` | `pipeline.erase` | 字形掩码、OpenCV修复、cleaned PNG |
+| `erase-v2` | `pipeline.erase_v2` | V2块/气泡填充擦除，可替代`erase` |
 | `write` | `pipeline.pdf_writer` | 中文排版、PDF组装、程序检查 |
 
 `pipeline.page_review`和`pipeline.pdf_backfill`是内部共用模块，不作为独立生产入口。
@@ -32,7 +33,7 @@ runs/book/<slug>/
   05-pdf/
 ```
 
-阶段模块不自行拼接业务目录；统一入口显式把`BookPaths`中的绝对路径传给模块。
+阶段模块不自行拼接业务目录；统一入口显式把`BookPaths`中的项目相对路径传给模块。
 若同批PDF规范化后得到重复slug，必须在写入前停止。
 
 ## 数据流

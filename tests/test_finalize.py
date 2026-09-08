@@ -132,6 +132,24 @@ class CodexBookFinalizeTests(unittest.TestCase):
                     source_pdf=pdf,
                 )
 
+    def test_ignore_hash_validation_allows_changed_page_record(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = pathlib.Path(temporary)
+            pdf, pages_dir, reviews_dir, plan_path, plan = self.make_fixture(root)
+            page_json = pages_dir / "page-0001.json"
+            record = json.loads(page_json.read_text(encoding="utf-8"))
+            record["layout"]["content"] = "<|ref|>Changed<|/ref|>"
+            page_json.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+            records, _aggregate = finalize.merge_book_reviews(
+                plan=plan,
+                plan_path=plan_path,
+                pages_dir=pages_dir,
+                reviews_dir=reviews_dir,
+                source_pdf=pdf,
+                ignore_hash_validation=True,
+            )
+        self.assertEqual(records[0]["study"]["regions"][0]["translation"], "你好！")
+
 
 if __name__ == "__main__":
     unittest.main()

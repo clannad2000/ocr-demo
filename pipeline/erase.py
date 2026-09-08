@@ -32,6 +32,8 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 import cv2
 import numpy as np
 
+from .paths import project_relative_path, use_project_working_directory
+
 
 # DeepSeek-OCR grounded output example:
 # <|ref|>Shapes<|/ref|><|det|>[[568, 30, 644, 52]]<|/det|>
@@ -633,20 +635,19 @@ def make_adjusted_json(
 
 def discover_page_pairs(pages_dir: Path) -> List[Tuple[Path, Path]]:
     """Return all deterministically ordered same-stem PNG/JSON page pairs."""
-    resolved_dir = pages_dir.expanduser().resolve()
-    if not resolved_dir.is_dir():
-        raise ProcessingError(f"Pages directory does not exist: {resolved_dir}")
+    if not pages_dir.is_dir():
+        raise ProcessingError(f"Pages directory does not exist: {pages_dir}")
 
     image_paths = sorted(
         (
             path
-            for path in resolved_dir.iterdir()
+            for path in pages_dir.iterdir()
             if path.is_file() and path.suffix.lower() == ".png"
         ),
         key=lambda path: path.name.casefold(),
     )
     if not image_paths:
-        raise ProcessingError(f"No PNG page images found in: {resolved_dir}")
+        raise ProcessingError(f"No PNG page images found in: {pages_dir}")
 
     pairs: List[Tuple[Path, Path]] = []
     missing_json: List[str] = []
@@ -672,16 +673,16 @@ def process(
     json_path: Optional[Path] = None,
 ) -> Dict[str, Path]:
     image_path = (
-        image_path.expanduser().resolve()
+        image_path.expanduser()
         if image_path is not None
-        else Path(args.image).expanduser().resolve()
+        else Path(args.image).expanduser()
     )
     json_path = (
-        json_path.expanduser().resolve()
+        json_path.expanduser()
         if json_path is not None
-        else Path(args.json).expanduser().resolve()
+        else Path(args.json).expanduser()
     )
-    output_dir = Path(args.output_dir).expanduser().resolve()
+    output_dir = Path(args.output_dir).expanduser()
 
     if not image_path.is_file():
         raise ProcessingError(f"Image file does not exist: {image_path}")
@@ -820,7 +821,23 @@ def process_pages(args: argparse.Namespace) -> List[Tuple[Path, Dict[str, Path]]
 
 
 def main(argv: List[str] | None = None) -> int:
+    use_project_working_directory()
     args = parse_args(argv)
+    try:
+        if args.image:
+            args.image = str(project_relative_path(args.image, label="Source image"))
+        if args.json:
+            args.json = str(project_relative_path(args.json, label="OCR JSON"))
+        if args.pages_dir:
+            args.pages_dir = str(
+                project_relative_path(args.pages_dir, label="OCR pages directory")
+            )
+        args.output_dir = str(
+            project_relative_path(args.output_dir, label="Erased page output directory")
+        )
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     try:
         if args.pages_dir:
             batch_output_paths = process_pages(args)

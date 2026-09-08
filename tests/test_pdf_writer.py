@@ -12,7 +12,7 @@ class PdfTranslationWriterTests(unittest.TestCase):
         import pymupdf
         from PIL import Image
 
-        font = pathlib.Path("C:/Windows/Fonts/simhei.ttf")
+        font = pathlib.Path("../assets/fonts/simhei.ttf")
         if not font.is_file():
             self.skipTest("Chinese test font is unavailable")
         with tempfile.TemporaryDirectory() as temporary:

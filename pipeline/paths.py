@@ -1,26 +1,44 @@
 from __future__ import annotations
 
 import dataclasses
+import os
 import pathlib
 import re
 from typing import Any
 
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parent.parent
-DEFAULT_CONFIG = PROJECT_ROOT / "config" / "pipeline.json"
-DEFAULT_RUNS_ROOT = PROJECT_ROOT / "runs" / "book"
-OVERRIDES_ROOT = PROJECT_ROOT / "config" / "overrides"
+DEFAULT_CONFIG = pathlib.Path("config") / "pipeline.json"
+DEFAULT_RUNS_ROOT = pathlib.Path("runs") / "book"
+OVERRIDES_ROOT = pathlib.Path("config") / "overrides"
+RUNTIME_TEMP_ROOT = pathlib.Path("runs") / ".tmp"
 
 
 class PathLayoutError(ValueError):
     """Raised when PDF discovery or generated book paths are ambiguous."""
 
 
-def resolve_project_path(value: str | pathlib.Path) -> pathlib.Path:
+def use_project_working_directory() -> None:
+    """Make project-relative CLI paths independent of the launch directory."""
+
+    if pathlib.Path.cwd().resolve() != PROJECT_ROOT:
+        os.chdir(PROJECT_ROOT)
+
+
+def project_relative_path(value: str | pathlib.Path, *, label: str) -> pathlib.Path:
+    """Return a normalized path relative to the project root.
+
+    CLI and configuration values may use an existing absolute project path for
+    backward compatibility, but all subsequent filesystem operations receive
+    the returned relative path. Paths outside the project are rejected.
+    """
+
     path = pathlib.Path(value).expanduser()
-    if not path.is_absolute():
-        path = PROJECT_ROOT / path
-    return path.resolve()
+    absolute = path.resolve() if path.is_absolute() else (PROJECT_ROOT / path).resolve()
+    try:
+        return absolute.relative_to(PROJECT_ROOT)
+    except ValueError as error:
+        raise PathLayoutError(f"{label} must be inside the project: {path}") from error
 
 
 def book_slug(pdf_path: pathlib.Path) -> str:
@@ -35,14 +53,14 @@ def discover_pdfs(config: dict[str, Any]) -> list[pathlib.Path]:
     raw = config.get("pdf")
     if not isinstance(raw, str) or not raw.strip():
         raise PathLayoutError("Configuration field 'pdf' is required")
-    source = resolve_project_path(raw)
+    source = project_relative_path(raw, label="Configured PDF path")
     if source.is_file():
         if source.suffix.lower() != ".pdf":
             raise PathLayoutError(f"Configured file is not a PDF: {source}")
         pdfs = [source]
     elif source.is_dir():
         pdfs = sorted(
-            (item.resolve() for item in source.iterdir() if item.is_file() and item.suffix.lower() == ".pdf"),
+            (item for item in source.iterdir() if item.is_file() and item.suffix.lower() == ".pdf"),
             key=lambda item: item.name.casefold(),
         )
         if not pdfs:

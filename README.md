@@ -34,6 +34,7 @@ ocr-demo/
 - Poppler的`pdftoppm`和`pdfinfo`；
 - Node.js 18或更高版本；
 - 已使用ChatGPT帐号登录的Codex CLI。
+- 将可用的中文 TrueType/OpenType 字体放入`assets/fonts/simhei.ttf`（该路径由配置模板使用）。
 
 项目优先使用`.conda`环境：
 
@@ -107,6 +108,7 @@ runs/book/beast_academy_math_guide_3A/
 .\.conda\python.exe -m pipeline review
 .\.conda\python.exe -m pipeline finalize
 .\.conda\python.exe -m pipeline erase
+.\.conda\python.exe -m pipeline erase-v2       # 可选：用V2替代V1
 .\.conda\python.exe -m pipeline write
 ```
 
@@ -155,6 +157,14 @@ runs/book/beast_academy_math_guide_3A/
 ```powershell
 .\.conda\python.exe -m pipeline erase --dilate-iterations 2
 ```
+
+也可以使用V2擦除器；它采用相同的自动输入和输出路径，不需要传入目录参数：
+
+```powershell
+.\.conda\python.exe -m pipeline erase-v2
+```
+
+`python -m pipeline.erase_v2`无参数运行时等价于上述统一入口命令。
 
 擦除器不写中文，也不修改页面JSON。
 

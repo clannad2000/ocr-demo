@@ -5,9 +5,16 @@ import pathlib
 import sys
 from collections.abc import Callable
 
-from . import codex_review, erase, finalize, ocr, pdf_writer
+from . import codex_review, erase, erase_v2, finalize, ocr, pdf_writer
 from .config import ConfigError, load_config
-from .paths import BookPaths, DEFAULT_CONFIG, PathLayoutError, discover_pdfs
+from .paths import (
+    BookPaths,
+    DEFAULT_CONFIG,
+    PathLayoutError,
+    discover_pdfs,
+    project_relative_path,
+    use_project_working_directory,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -27,6 +34,11 @@ def build_parser() -> argparse.ArgumentParser:
     erase_parser = subparsers.add_parser("erase")
     erase_parser.add_argument("--dilate-iterations", type=int, default=2)
     erase_parser.add_argument("--remove-page-number", action="store_true")
+    erase_v2_parser = subparsers.add_parser("erase-v2", aliases=["erase_v2"])
+    erase_v2_parser.add_argument(
+        "--strategy", choices=("auto", "block", "bubble"), default="auto"
+    )
+    erase_v2_parser.add_argument("--remove-page-number", action="store_true")
     return parser
 
 
@@ -118,6 +130,25 @@ def run_erase(book: BookPaths, config_path: pathlib.Path, args: argparse.Namespa
     return erase.main(command)
 
 
+def run_erase_v2(
+    book: BookPaths,
+    config_path: pathlib.Path,
+    args: argparse.Namespace,
+    config: dict,
+) -> int:
+    command = [
+        "--pages-dir",
+        str(book.pages),
+        "--output-dir",
+        str(book.erased),
+        "--strategy",
+        args.strategy,
+    ]
+    if args.remove_page_number:
+        command.append("--remove-page-number")
+    return erase_v2.main(command)
+
+
 def run_write(book: BookPaths, config_path: pathlib.Path, args: argparse.Namespace, config: dict) -> int:
     command = _common_config(config_path) + [
         "--pdf",
@@ -147,15 +178,18 @@ RUNNERS: dict[str, Callable[[BookPaths, pathlib.Path, argparse.Namespace, dict],
     "review": run_review,
     "finalize": run_finalize,
     "erase": run_erase,
+    "erase-v2": run_erase_v2,
+    "erase_v2": run_erase_v2,
     "write": run_write,
 }
 
 
 def main(argv: list[str] | None = None) -> int:
+    use_project_working_directory()
     parser = build_parser()
     args = parser.parse_args(argv)
-    config_path = args.config.expanduser().resolve()
     try:
+        config_path = project_relative_path(args.config, label="Configuration path")
         config = load_config(config_path)
         books = [BookPaths.for_pdf(pdf) for pdf in discover_pdfs(config)]
         runner = RUNNERS[args.stage]

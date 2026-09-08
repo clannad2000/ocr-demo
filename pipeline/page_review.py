@@ -24,6 +24,14 @@ import tempfile
 import time
 from typing import Any
 
+from .config import get_ignore_hash_validation
+from .paths import (
+    DEFAULT_CONFIG,
+    RUNTIME_TEMP_ROOT,
+    project_relative_path,
+    use_project_working_directory,
+)
+
 
 DEFAULT_MODEL = "gpt-5.6-terra"
 DEFAULT_REASONING_EFFORT = "high"
@@ -53,6 +61,7 @@ class CodexSettings:
     timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS
     image_mode: str = "on_demand"
     require_chatgpt_login: bool = True
+    ignore_hash_validation: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -136,10 +145,14 @@ def read_json(path: pathlib.Path, *, jsonc: bool = False) -> Any:
 
 
 def load_settings(config_path: pathlib.Path) -> CodexSettings:
-    config_path = config_path.expanduser().resolve()
+    config_path = config_path.expanduser()
     data = read_json(config_path, jsonc=True)
     if not isinstance(data, dict):
         raise CodexPageReviewError("Config root must be a JSON object")
+    try:
+        ignore_hash_validation = get_ignore_hash_validation(data)
+    except ValueError as error:
+        raise CodexPageReviewError(str(error)) from error
     raw = data.get("codex_review", {})
     if not isinstance(raw, dict):
         raise CodexPageReviewError("config.codex_review must be an object")
@@ -221,6 +234,7 @@ def load_settings(config_path: pathlib.Path) -> CodexSettings:
         timeout_seconds=timeout_seconds,
         image_mode=image_mode,
         require_chatgpt_login=require_chatgpt_login,
+        ignore_hash_validation=ignore_hash_validation,
     )
 
 
@@ -243,7 +257,7 @@ def load_page_inputs(
     *,
     include_image: bool,
 ) -> PageReviewInputs:
-    json_path = page_json.expanduser().resolve()
+    json_path = page_json.expanduser()
     match = PAGE_JSON_FILENAME_RE.fullmatch(json_path.name)
     if not match:
         raise CodexPageReviewError(
@@ -668,13 +682,19 @@ def invoke_codex(
         allow_image_followup=allow_image_followup,
     )
     started = time.monotonic()
-    with tempfile.TemporaryDirectory(prefix="codex-page-review-") as temporary:
-        schema_path = pathlib.Path(temporary) / "output-schema.json"
+    RUNTIME_TEMP_ROOT.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix="codex-page-review-", dir=RUNTIME_TEMP_ROOT
+    ) as temporary:
+        temporary_dir = project_relative_path(
+            temporary, label="Codex page review temporary directory"
+        )
+        schema_path = temporary_dir / "output-schema.json"
         schema_path.write_text(
             json.dumps(schema, ensure_ascii=False, indent=2) + "\n",
             encoding="utf-8",
         )
-        result_path = pathlib.Path(temporary) / "final-response.json"
+        result_path = temporary_dir / "final-response.json"
         args = build_codex_command(
             command,
             settings,
@@ -878,7 +898,11 @@ def validate_codex_response(
     }
 
 
-def verify_inputs_unchanged(page_inputs: PageReviewInputs) -> None:
+def verify_inputs_unchanged(
+    page_inputs: PageReviewInputs, *, ignore_hash_validation: bool = False
+) -> None:
+    if ignore_hash_validation:
+        return
     paths = [page_inputs.json_path]
     if page_inputs.image_path is not None:
         paths.append(page_inputs.image_path)
@@ -1112,7 +1136,7 @@ def resolve_page_json_argument(
     if page_json is not None:
         return page_json
     assert page_markdown is not None
-    markdown_path = page_markdown.expanduser().resolve()
+    markdown_path = page_markdown.expanduser()
     if not PAGE_MARKDOWN_FILENAME_RE.fullmatch(markdown_path.name):
         raise CodexPageReviewError(
             "Legacy page Markdown locator must match page-XXXX.md: "
@@ -1131,7 +1155,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config",
         type=pathlib.Path,
-        default=pathlib.Path(__file__).resolve().parent.parent / "config" / "pipeline.json",
+        default=DEFAULT_CONFIG,
     )
     page_group = parser.add_mutually_exclusive_group(required=True)
     page_group.add_argument(
@@ -1162,20 +1186,25 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    use_project_working_directory()
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        settings = load_settings(args.config)
-        page_json = resolve_page_json_argument(
-            page_json=args.page_json,
-            page_markdown=args.page_md,
+        config_path = project_relative_path(args.config, label="Configuration path")
+        settings = load_settings(config_path)
+        page_json = project_relative_path(
+            resolve_page_json_argument(
+                page_json=args.page_json,
+                page_markdown=args.page_md,
+            ),
+            label="Study page JSON",
         )
         page_inputs = load_page_inputs(
             page_json,
             include_image=settings.image_mode != "never",
         )
         output_path = (
-            args.output.expanduser().resolve()
+            project_relative_path(args.output, label="Codex review output")
             if args.output
             else default_output_path(page_inputs.json_path)
         )
@@ -1226,7 +1255,9 @@ def main(argv: list[str] | None = None) -> int:
             stages,
             used_inputs,
         ) = run_review_stages(settings, page_inputs)
-        verify_inputs_unchanged(used_inputs)
+        verify_inputs_unchanged(
+            used_inputs, ignore_hash_validation=settings.ignore_hash_validation
+        )
         saved = build_saved_result(
             used_inputs,
             settings,
@@ -1254,7 +1285,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         return 0
-    except CodexPageReviewError as error:
+    except (CodexPageReviewError, ValueError) as error:
         parser.error(str(error))
         return 2
 

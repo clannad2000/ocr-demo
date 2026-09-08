@@ -7,6 +7,8 @@
   "long_edge": 2048,
   "workers": 2,
   "verify": "auto",
+  // 设为 true 会跳过各阶段之间的 SHA-256 完整性比对；仍会验证文件、结构和内容。
+  "ignore_hash_validation": false,
   "resume": false,
 
   "codex_review": {
@@ -22,7 +24,7 @@
   },
 
   "pdf_writer": {
-    "font_file": "C:/Windows/Fonts/simhei.ttf",
+    "font_file": "assets/fonts/simhei.ttf",
     "rules": {
       "minimum_font_size": 7.0,
       "font_size_step": 0.5,
@@ -84,6 +86,6 @@
     "oauth_keychain_service": "Beast Academy OCR DeepL MCP",
     "oauth_keychain_account": "https://mcp.deepl.com/v1/mcp",
     "node_command": "node",
-    "bridge_script": "../tools/deepl_mcp_client.mjs"
+    "bridge_script": "tools/deepl_mcp_client.mjs"
   }
 }

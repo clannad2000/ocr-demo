@@ -21,13 +21,18 @@ import queue
 import re
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from typing import Any, Iterable
 
 from . import page_review
-from .paths import PROJECT_ROOT
+from .config import get_ignore_hash_validation
+from .paths import (
+    DEFAULT_CONFIG,
+    RUNTIME_TEMP_ROOT,
+    project_relative_path,
+    use_project_working_directory,
+)
 
 
 SCHEMA_VERSION = 1
@@ -61,6 +66,7 @@ class BookSettings:
     toc_image_detail: str = "high"
     exclude_preliminary: bool = False
     exclude_back_matter: bool = True
+    ignore_hash_validation: bool = False
 
 
 @dataclasses.dataclass(frozen=True)
@@ -86,10 +92,14 @@ def read_json(path: pathlib.Path, *, jsonc: bool = False) -> Any:
 
 
 def load_settings(config_path: pathlib.Path) -> tuple[BookSettings, dict[str, Any]]:
-    config_path = config_path.expanduser().resolve()
+    config_path = config_path.expanduser()
     data = read_json(config_path, jsonc=True)
     if not isinstance(data, dict):
         raise BookReviewError("Config root must be an object")
+    try:
+        ignore_hash_validation = get_ignore_hash_validation(data)
+    except ValueError as error:
+        raise BookReviewError(str(error)) from error
     raw = data.get("codex_review", {})
     if not isinstance(raw, dict):
         raise BookReviewError("Codex review configuration must be an object")
@@ -124,6 +134,7 @@ def load_settings(config_path: pathlib.Path) -> tuple[BookSettings, dict[str, An
         toc_image_detail=str(merged.get("toc_image_detail", "high")).strip(),
         exclude_preliminary=merged.get("exclude_preliminary", False),
         exclude_back_matter=merged.get("exclude_back_matter", True),
+        ignore_hash_validation=ignore_hash_validation,
     )
     if not settings.command or not settings.model:
         raise BookReviewError("Codex command and model must not be empty")
@@ -151,10 +162,7 @@ def resolve_config_path(
 ) -> pathlib.Path | None:
     if value is None or not str(value).strip():
         return None
-    path = pathlib.Path(value).expanduser()
-    if not path.is_absolute():
-        path = PROJECT_ROOT / path
-    return path.resolve()
+    return project_relative_path(value, label="Configuration path")
 
 
 def parse_page_spec(spec: str) -> list[int]:
@@ -199,9 +207,16 @@ def atomic_write_json(path: pathlib.Path, value: Any) -> None:
 
 
 def find_pdf_tools(config: dict[str, Any], config_path: pathlib.Path) -> tuple[str, str]:
-    configured = resolve_config_path(
-        config.get("pdftoppm_command"), config_path=config_path
+    configured_value = config.get("pdftoppm_command")
+    configured = (
+        pathlib.Path(str(configured_value)).expanduser()
+        if configured_value
+        else None
     )
+    if configured is not None and not configured.is_absolute():
+        configured = project_relative_path(
+            configured, label="Configured pdftoppm command"
+        )
     candidates: list[pathlib.Path] = []
     if configured is not None:
         candidates.append(configured)
@@ -285,7 +300,7 @@ def render_toc_pages(
                 f"Could not render TOC PDF page {page}: "
                 + (completed.stderr.strip() or "no PNG produced")
             )
-        outputs.append(output.resolve())
+        outputs.append(output)
     return outputs
 
 
@@ -1035,7 +1050,9 @@ def review_one_page(
                 }
             )
             used_inputs = inputs
-    page_review.verify_inputs_unchanged(used_inputs)
+    page_review.verify_inputs_unchanged(
+        used_inputs, ignore_hash_validation=settings.ignore_hash_validation
+    )
     return {
         "schema_version": 5,
         "review_scope": "book_chapter_page",
@@ -1073,13 +1090,18 @@ def review_one_page(
     }
 
 
-def validate_plan_sources(plan: dict[str, Any], pdf_path: pathlib.Path) -> None:
+def validate_plan_sources(
+    plan: dict[str, Any],
+    pdf_path: pathlib.Path,
+    *,
+    ignore_hash_validation: bool = False,
+) -> None:
     if plan.get("kind") != "codex_book_review_plan":
         raise BookReviewError("Invalid book review plan")
     pdf = plan.get("pdf")
     if not isinstance(pdf, dict) or pdf.get("path") != str(pdf_path):
         raise BookReviewError("Book review plan points to a different PDF")
-    if sha256_file(pdf_path) != pdf.get("sha256"):
+    if not ignore_hash_validation and sha256_file(pdf_path) != pdf.get("sha256"):
         raise BookReviewError("PDF changed after the book review plan was created")
 
 
@@ -1113,7 +1135,10 @@ def execute_review(
             "threads": {},
             "completed_pages": [],
         }
-    if checkpoint.get("plan_sha256") != sha256_file(plan_path):
+    if (
+        not settings.ignore_hash_validation
+        and checkpoint.get("plan_sha256") != sha256_file(plan_path)
+    ):
         raise BookReviewError("Checkpoint belongs to a different plan")
     completed = set(checkpoint.get("completed_pages", []))
     page_results: list[dict[str, Any]] = []
@@ -1171,9 +1196,9 @@ def execute_review(
 
 def create_isolated_workspace(pdf_path: pathlib.Path) -> pathlib.Path:
     identity = hashlib.sha256(str(pdf_path).encode("utf-8")).hexdigest()[:16]
-    path = pathlib.Path(tempfile.gettempdir()) / "ocr-demo-codex-book" / identity
+    path = RUNTIME_TEMP_ROOT / "codex-book" / identity
     path.mkdir(parents=True, exist_ok=True)
-    return path.resolve()
+    return path
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1184,7 +1209,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config",
         type=pathlib.Path,
-        default=pathlib.Path(__file__).resolve().parent.parent / "config" / "pipeline.json",
+        default=DEFAULT_CONFIG,
     )
     parser.add_argument("--pdf", type=pathlib.Path)
     parser.add_argument("--toc-pages", help="PDF page range, for example 5-6")
@@ -1204,13 +1229,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    use_project_working_directory()
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        config_path = args.config.expanduser().resolve()
+        config_path = project_relative_path(args.config, label="Configuration path")
         settings, config = load_settings(config_path)
         pdf_path = (
-            args.pdf.expanduser().resolve()
+            project_relative_path(args.pdf, label="Source PDF path")
             if args.pdf
             else resolve_config_path(config.get("pdf"), config_path=config_path)
         )
@@ -1218,12 +1244,12 @@ def main(argv: list[str] | None = None) -> int:
             raise BookReviewError(f"PDF not found: {pdf_path}")
         base_output = resolve_config_path(config.get("output"), config_path=config_path)
         output_dir = (
-            args.output.expanduser().resolve()
+            project_relative_path(args.output, label="Review output path")
             if args.output
-            else (base_output or config_path.parent / "runs") / "book-codex-review"
+            else (base_output or pathlib.Path("runs")) / "book-codex-review"
         )
         pages_dir = (
-            args.pages_dir.expanduser().resolve()
+            project_relative_path(args.pages_dir, label="OCR pages directory")
             if args.pages_dir
             else (base_output or output_dir.parent) / "pages"
         )
@@ -1336,7 +1362,11 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 plan = read_json(plan_path)
             if args.command in {"review", "all"}:
-                validate_plan_sources(plan, pdf_path)
+                validate_plan_sources(
+                    plan,
+                    pdf_path,
+                    ignore_hash_validation=settings.ignore_hash_validation,
+                )
                 missing = missing_page_inputs(plan, pages_dir)
                 if missing:
                     preview = ", ".join(str(page) for page in missing[:20])
@@ -1370,7 +1400,7 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 )
         return 0
-    except (BookReviewError, page_review.CodexPageReviewError) as error:
+    except (BookReviewError, page_review.CodexPageReviewError, ValueError) as error:
         parser.error(str(error))
         return 2
 

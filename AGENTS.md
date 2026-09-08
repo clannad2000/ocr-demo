@@ -6,15 +6,9 @@
 不要把临时命令或单次批次详情复制到本文件。
 
 ## 操作权限
-
-- 默认只修改代码、配置模板和文档，并执行本地语法、单元、配置和mock检查。
 - 真实OCR、翻译、外部模型复核和批处理由用户运行，除非当前请求明确授权。
 - 修改后提供精确命令，等用户运行，然后只读检查产物。
 - 若缺少软件、依赖或需要管理员权限，立即停止，给出多个方案及优缺点，等用户选择。
-
-## 安全与不可变数据
-- Codex裁决不得写回页面JSON、`manifest.json`或`study.html`；只生成独立裁决和`study-reviewed.html`。
-- 应用裁决前必须验证输入SHA-256和全部`page + region id`。
 
 ## 架构不变式
 
@@ -38,6 +32,5 @@
 
 - 代码改动至少运行`python -m py_compile pipeline/__main__.py pipeline/config.py pipeline/paths.py pipeline/ocr.py pipeline/page_review.py pipeline/codex_review.py pipeline/finalize.py pipeline/erase.py pipeline/pdf_backfill.py pipeline/pdf_writer.py`和`python -m unittest discover -s tests`。
 - 配置改动需解析`config/pipeline.example.json`；不得打印`config/.env`密钥或OAuth凭据。
-- 裁决改动需验证候选并集、决定计数、坐标唯一性、输入哈希和原记录不变。
 - 必须区分语法/mock/本地验证与真实外部API端到端验证。
 - PDF程序检查通过只能标记`program_checked`，不得表述为视觉验收通过；最终视觉接受由用户确认。

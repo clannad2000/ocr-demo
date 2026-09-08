@@ -17,6 +17,7 @@ ALLOWED_ROOT_FIELDS = {
     "pdftoppm_command",
     "workers",
     "verify",
+    "ignore_hash_validation",
     "resume",
     "redo_pages",
     "printed_page_offset",
@@ -72,7 +73,7 @@ def strip_json_comments(source: str) -> str:
 
 
 def load_config(path: pathlib.Path) -> dict[str, Any]:
-    path = path.expanduser().resolve()
+    path = path.expanduser()
     try:
         value = json.loads(strip_json_comments(path.read_text(encoding="utf-8")))
     except OSError as error:
@@ -87,4 +88,14 @@ def load_config(path: pathlib.Path) -> dict[str, Any]:
     for field in ("codex_review", "pdf_writer", "model_profiles", "model_usage", "translation"):
         if field in value and not isinstance(value[field], dict):
             raise ConfigError(f"Configuration field '{field}' must be an object")
+    get_ignore_hash_validation(value)
+    return value
+
+
+def get_ignore_hash_validation(config: dict[str, Any]) -> bool:
+    """Return the explicit global opt-out for artifact hash comparisons."""
+
+    value = config.get("ignore_hash_validation", False)
+    if not isinstance(value, bool):
+        raise ConfigError("Configuration field 'ignore_hash_validation' must be boolean")
     return value

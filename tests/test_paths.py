@@ -3,14 +3,14 @@ import tempfile
 import unittest
 
 from pipeline.config import ConfigError, load_config
-from pipeline.paths import BookPaths, book_slug, discover_pdfs
+from pipeline.paths import BookPaths, PROJECT_ROOT, RUNTIME_TEMP_ROOT, book_slug, discover_pdfs
 
 
 class PipelinePathTests(unittest.TestCase):
     def test_book_slug_matches_confirmed_layout(self) -> None:
         pdf = pathlib.Path("beast academy math guide 3A.pdf")
         self.assertEqual(book_slug(pdf), "beast_academy_math_guide_3A")
-        paths = BookPaths.for_pdf(pdf.resolve())
+        paths = BookPaths.for_pdf(pdf)
         self.assertEqual(paths.root.name, "beast_academy_math_guide_3A")
         self.assertEqual(paths.pages.relative_to(paths.root).as_posix(), "01-ocr/pages")
         self.assertEqual(paths.review.name, "02-codex-review")
@@ -19,14 +19,15 @@ class PipelinePathTests(unittest.TestCase):
         self.assertEqual(paths.pdf_output.name, "05-pdf")
 
     def test_pdf_directory_discovery_is_sorted_and_non_recursive(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = pathlib.Path(temporary)
+        RUNTIME_TEMP_ROOT.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=RUNTIME_TEMP_ROOT) as temporary:
+            root = pathlib.Path(temporary).resolve()
             (root / "B.pdf").write_bytes(b"pdf")
             (root / "a.PDF").write_bytes(b"pdf")
             nested = root / "nested"
             nested.mkdir()
             (nested / "ignored.pdf").write_bytes(b"pdf")
-            discovered = discover_pdfs({"pdf": str(root)})
+            discovered = discover_pdfs({"pdf": str(root.relative_to(PROJECT_ROOT))})
         self.assertEqual([path.name for path in discovered], ["a.PDF", "B.pdf"])
 
     def test_derived_output_paths_are_rejected_in_shared_config(self) -> None:
@@ -38,6 +39,26 @@ class PipelinePathTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ConfigError, "output"):
                 load_config(config)
+
+    def test_ignore_hash_validation_must_be_boolean(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config = pathlib.Path(temporary) / "pipeline.json"
+            config.write_text(
+                '{"pdf": "book.pdf", "ignore_hash_validation": "true"}',
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ConfigError, "ignore_hash_validation"):
+                load_config(config)
+
+    def test_ignore_hash_validation_is_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            config = pathlib.Path(temporary) / "pipeline.json"
+            config.write_text(
+                '{"pdf": "book.pdf", "ignore_hash_validation": true}',
+                encoding="utf-8",
+            )
+            loaded = load_config(config)
+        self.assertTrue(loaded["ignore_hash_validation"])
 
 
 if __name__ == "__main__":

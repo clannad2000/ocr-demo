@@ -21,6 +21,8 @@ from typing import Any
 
 from . import codex_review as book_review
 from . import page_review
+from .config import get_ignore_hash_validation
+from .paths import DEFAULT_CONFIG, project_relative_path, use_project_working_directory
 
 
 DEFAULT_RULES: dict[str, Any] = {
@@ -167,11 +169,15 @@ def load_layout_overrides(path: pathlib.Path | None) -> dict[tuple[int, str], di
 
 
 def validate_snapshot(
-    snapshot: dict[str, Any], *, source_pdf: pathlib.Path, snapshot_path: pathlib.Path
+    snapshot: dict[str, Any],
+    *,
+    source_pdf: pathlib.Path,
+    snapshot_path: pathlib.Path,
+    ignore_hash_validation: bool = False,
 ) -> dict[tuple[int, str], dict[str, Any]]:
     if snapshot.get("schema_version") != 1 or snapshot.get("status") != "locked_final_translation":
         raise PdfWriterError("Final translation snapshot is not locked schema version 1")
-    if pathlib.Path(str(snapshot.get("source_pdf", ""))).resolve() != source_pdf:
+    if pathlib.Path(str(snapshot.get("source_pdf", ""))) != source_pdf:
         raise PdfWriterError("Final translation snapshot belongs to a different PDF")
     inputs = snapshot.get("inputs")
     if not isinstance(inputs, dict):
@@ -179,12 +185,20 @@ def validate_snapshot(
     adjudication_path = pathlib.Path(str(inputs.get("adjudication_file", "")))
     if not adjudication_path.is_file():
         raise PdfWriterError("Snapshot adjudication file is missing")
-    if page_review.sha256_file(adjudication_path) != inputs.get("adjudication_sha256"):
+    if (
+        not ignore_hash_validation
+        and page_review.sha256_file(adjudication_path)
+        != inputs.get("adjudication_sha256")
+    ):
         raise PdfWriterError("Snapshot adjudication file changed after locking")
     adjudication = read_json(adjudication_path)
     if not isinstance(adjudication, dict):
         raise PdfWriterError("Snapshot adjudication root must be an object")
-    if adjudication.get("source_pdf_sha256") != page_review.sha256_file(source_pdf):
+    if (
+        not ignore_hash_validation
+        and adjudication.get("source_pdf_sha256")
+        != page_review.sha256_file(source_pdf)
+    ):
         raise PdfWriterError("Source PDF changed after finalization")
     regions = snapshot.get("regions")
     if not isinstance(regions, list) or len(regions) != snapshot.get("region_count"):
@@ -250,24 +264,18 @@ def discover_cleaned_pages(
         if not matches:
             missing.append(page)
         else:
-            found[page] = matches[0].resolve()
+            found[page] = matches[0]
     return found, missing
 
 
 def resolve_font(configured: pathlib.Path | None) -> pathlib.Path:
     candidates = [configured] if configured is not None else []
-    candidates.extend(
-        [
-            pathlib.Path("C:/Windows/Fonts/simhei.ttf"),
-            pathlib.Path("C:/Windows/Fonts/Deng.ttf"),
-            pathlib.Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
-            pathlib.Path("/System/Library/Fonts/PingFang.ttc"),
-        ]
-    )
     for candidate in candidates:
         if candidate is not None and candidate.is_file():
-            return candidate.resolve()
-    raise PdfWriterError("A Chinese TrueType/OpenType font file was not found")
+            return candidate
+    raise PdfWriterError(
+        "A project-relative Chinese TrueType/OpenType font file was not found"
+    )
 
 
 def hex_color(value: str) -> tuple[float, float, float]:
@@ -729,7 +737,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--config",
         type=pathlib.Path,
-        default=pathlib.Path(__file__).resolve().parent.parent / "config" / "pipeline.json",
+        default=DEFAULT_CONFIG,
     )
     parser.add_argument("--pdf", type=pathlib.Path)
     parser.add_argument("--snapshot", type=pathlib.Path)
@@ -745,18 +753,25 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    use_project_working_directory()
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        config_path = args.config.expanduser().resolve()
+        config_path = project_relative_path(args.config, label="Configuration path")
         config = book_review.read_json(config_path, jsonc=True)
         if not isinstance(config, dict):
             raise PdfWriterError("Config root must be an object")
+        try:
+            ignore_hash_validation = get_ignore_hash_validation(config)
+        except ValueError as error:
+            raise PdfWriterError(str(error)) from error
         configured_output = book_review.resolve_config_path(
             config.get("output"), config_path=config_path
         )
         base_output = configured_output or (
-            args.output.expanduser().resolve().parent if args.output else None
+            project_relative_path(args.output, label="Translated PDF output").parent
+            if args.output
+            else None
         )
         if base_output is None:
             raise PdfWriterError("--output is required when config has no output directory")
@@ -778,7 +793,7 @@ def main(argv: list[str] | None = None) -> int:
                 + ", ".join(unknown_writer_fields)
             )
         source_pdf = (
-            args.pdf.expanduser().resolve()
+            project_relative_path(args.pdf, label="Source PDF path")
             if args.pdf
             else book_review.resolve_config_path(config.get("pdf"), config_path=config_path)
         )
@@ -787,12 +802,12 @@ def main(argv: list[str] | None = None) -> int:
 
         def output_path(value: Any, default: str) -> pathlib.Path:
             path = pathlib.Path(str(value or default)).expanduser()
-            if not path.is_absolute():
-                path = base_output / path
-            return path.resolve()
+            if path.is_absolute():
+                return project_relative_path(path, label="Configured output path")
+            return base_output / path
 
         snapshot_path = (
-            args.snapshot.expanduser().resolve()
+            project_relative_path(args.snapshot, label="Final translation snapshot")
             if args.snapshot
             else output_path(
                 backfill.get("final_translation_filename"),
@@ -800,12 +815,12 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         plan_path = (
-            args.plan.expanduser().resolve()
+            project_relative_path(args.plan, label="PDF backfill plan")
             if args.plan
             else output_path(backfill.get("plan_filename"), "pdf_backfill_plan.json")
         )
         output_pdf = (
-            args.output.expanduser().resolve()
+            project_relative_path(args.output, label="Translated PDF output")
             if args.output
             else output_path(
                 writer_config.get("output_filename", backfill.get("output_filename")),
@@ -813,7 +828,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         report_path = (
-            args.report.expanduser().resolve()
+            project_relative_path(args.report, label="PDF writer report")
             if args.report
             else output_path(
                 writer_config.get("report_filename", backfill.get("report_filename")),
@@ -821,7 +836,9 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         cleaned_dir = (
-            args.cleaned_pages_dir.expanduser().resolve()
+            project_relative_path(
+                args.cleaned_pages_dir, label="Cleaned pages directory"
+            )
             if args.cleaned_pages_dir
             else book_review.resolve_config_path(
                 writer_config.get("cleaned_pages_dir"), config_path=config_path
@@ -836,16 +853,19 @@ def main(argv: list[str] | None = None) -> int:
         configured_font_value = args.font_file or writer_config.get("font_file") or backfill.get("font_file")
         configured_font = None
         if configured_font_value:
-            configured_font = pathlib.Path(configured_font_value).expanduser()
-            if not configured_font.is_absolute():
-                configured_font = config_path.parent / configured_font
+            configured_font = project_relative_path(
+                pathlib.Path(configured_font_value), label="Chinese font file"
+            )
         font_file = resolve_font(configured_font)
         snapshot = read_json(snapshot_path)
         plan = read_json(plan_path)
         if not isinstance(snapshot, dict) or not isinstance(plan, dict):
             raise PdfWriterError("Snapshot and coordinate plan roots must be objects")
         snapshot_regions = validate_snapshot(
-            snapshot, source_pdf=source_pdf, snapshot_path=snapshot_path
+            snapshot,
+            source_pdf=source_pdf,
+            snapshot_path=snapshot_path,
+            ignore_hash_validation=ignore_hash_validation,
         )
         validate_plan(plan, snapshot_regions)
         pages = sorted(int(page) for page in snapshot.get("pages", []))
@@ -883,7 +903,7 @@ def main(argv: list[str] | None = None) -> int:
                 raise PdfWriterError(f"Output exists: {path}; pass --force to replace it")
         rules = merge_rules(writer_config.get("rules"))
         override_path = (
-            args.layout_overrides.expanduser().resolve()
+            project_relative_path(args.layout_overrides, label="Layout overrides")
             if args.layout_overrides
             else None
         )
